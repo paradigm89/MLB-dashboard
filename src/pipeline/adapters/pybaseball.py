@@ -239,6 +239,14 @@ class PybaseballAdapter(DataAdapter):
         existing = [c for c in keep if c in df.columns]
         return df[existing].copy()
 
+    # --- Not supported by pybaseball (use MLBStatsAdapter instead) ----------
+
+    def get_schedule(self, date: str) -> list:
+        raise NotImplementedError("Use MLBStatsAdapter for schedules")
+
+    def get_game_boxscore(self, game_pk: int) -> dict:
+        raise NotImplementedError("Use MLBStatsAdapter for boxscores")
+
     # --- Park factors --------------------------------------------------------
 
     def get_park_factors(self, season: int) -> pd.DataFrame:
