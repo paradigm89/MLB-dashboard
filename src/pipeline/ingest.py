@@ -364,9 +364,18 @@ if __name__ == "__main__":
                        help="Historical ingest for a range of seasons, e.g. --seasons 2019 2025")
     group.add_argument("--date", type=str, metavar="YYYY-MM-DD",
                        help="Incremental ingest for a single date")
+    parser.add_argument("--stats-only", action="store_true",
+                        help="Re-ingest batting/pitching stats only (skip Statcast). Fast.")
     args = parser.parse_args()
 
     if args.seasons:
-        run_historical_ingest(args.seasons[0], args.seasons[1])
+        if args.stats_only:
+            pb = PybaseballAdapter()
+            for season in range(args.seasons[0], args.seasons[1] + 1):
+                logger.info("Re-ingesting stats for %d", season)
+                _ingest_batting_stats(pb, season)
+                _ingest_pitching_stats(pb, season)
+        else:
+            run_historical_ingest(args.seasons[0], args.seasons[1])
     elif args.date:
         run_daily_ingest(args.date)
