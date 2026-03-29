@@ -44,6 +44,11 @@ def fetch_and_store_lineups(game_pk: int, home_team_id: int, away_team_id: int,
     home_confirmed = boxscore.get("home_lineup_confirmed", False)
     away_confirmed = boxscore.get("away_lineup_confirmed", False)
 
+    # If the boxscore already has the actual starter (game is live/started),
+    # prefer that over the schedule's probable pitcher.
+    home_sp_id = boxscore.get("home_sp_id") or home_sp_id
+    away_sp_id = boxscore.get("away_sp_id") or away_sp_id
+
     # Fall back to projected lineup for any side not yet confirmed
     if not home_confirmed or len(home_order) != 9:
         home_order = get_projected_lineup(home_team_id, game_date)
@@ -65,6 +70,10 @@ def fetch_and_store_lineups(game_pk: int, home_team_id: int, away_team_id: int,
         "away_lineup": away_order,
         "home_confirmed": home_confirmed,
         "away_confirmed": away_confirmed,
+        # Pass resolved SP IDs back so _process_game_prediction can use the
+        # best available pitcher (boxscore-confirmed > schedule probable > None)
+        "home_sp_id": home_sp_id,
+        "away_sp_id": away_sp_id,
     }
 
 
@@ -84,6 +93,10 @@ def check_and_update_confirmed_lineups(game_pk: int, home_team_id: int,
     home_confirmed = boxscore.get("home_lineup_confirmed", False)
     away_confirmed = boxscore.get("away_lineup_confirmed", False)
 
+    # Actual starters from boxscore (populated once game is live)
+    home_sp_id = boxscore.get("home_sp_id")
+    away_sp_id = boxscore.get("away_sp_id")
+
     home_updated = False
     away_updated = False
 
@@ -91,17 +104,25 @@ def check_and_update_confirmed_lineups(game_pk: int, home_team_id: int,
         existing_home = get_lineup(session, game_pk, home_team_id)
         existing_away = get_lineup(session, game_pk, away_team_id)
 
+    # Resolve SP IDs: boxscore confirmed > previously stored probable
+    if home_sp_id is None and existing_home and existing_home.sp_id:
+        home_sp_id = existing_home.sp_id
+    if away_sp_id is None and existing_away and existing_away.sp_id:
+        away_sp_id = existing_away.sp_id
+
     # Only update if we got a confirmed lineup and it wasn't already confirmed
     if home_confirmed and len(home_order) == 9:
         if existing_home is None or not existing_home.is_confirmed:
             _upsert_lineup(game_pk, game_date, home_team_id, is_home=True,
-                           batting_order=home_order, sp_id=None, is_confirmed=True)
+                           batting_order=home_order, sp_id=home_sp_id,
+                           is_confirmed=True)
             home_updated = True
 
     if away_confirmed and len(away_order) == 9:
         if existing_away is None or not existing_away.is_confirmed:
             _upsert_lineup(game_pk, game_date, away_team_id, is_home=False,
-                           batting_order=away_order, sp_id=None, is_confirmed=True)
+                           batting_order=away_order, sp_id=away_sp_id,
+                           is_confirmed=True)
             away_updated = True
 
     return {
@@ -111,6 +132,8 @@ def check_and_update_confirmed_lineups(game_pk: int, home_team_id: int,
         "away_lineup": away_order if away_confirmed else (existing_away.batting_order.split(",") if existing_away else []),
         "home_confirmed": home_confirmed,
         "away_confirmed": away_confirmed,
+        "home_sp_id": home_sp_id,
+        "away_sp_id": away_sp_id,
     }
 
 

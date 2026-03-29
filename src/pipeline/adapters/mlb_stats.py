@@ -14,6 +14,11 @@ from typing import Optional
 
 import statsapi
 
+# Module-level cache: player name → MLB player ID.
+# Populated lazily during get_schedule() calls so we never hit the lookup API
+# more than once per name per process lifetime.
+_player_id_cache: dict[str, Optional[int]] = {}
+
 import pandas as pd
 
 from src.pipeline.adapters.base import DataAdapter
@@ -94,6 +99,13 @@ class MLBStatsAdapter(DataAdapter):
         home_score = home.get("teamStats", {}).get("batting", {}).get("runs")
         away_score = away.get("teamStats", {}).get("batting", {}).get("runs")
 
+        # Actual starting pitchers: first ID in each team's pitchers list.
+        # This is only populated once the game is live/complete; pre-game it's empty.
+        home_pitchers = home.get("pitchers", [])
+        away_pitchers = away.get("pitchers", [])
+        home_sp_id = int(home_pitchers[0]) if home_pitchers else None
+        away_sp_id = int(away_pitchers[0]) if away_pitchers else None
+
         return {
             "home_score": home_score,
             "away_score": away_score,
@@ -108,6 +120,9 @@ class MLBStatsAdapter(DataAdapter):
             "away_batting_order": away_order,
             "home_lineup_confirmed": len(home_order) == 9,
             "away_lineup_confirmed": len(away_order) == 9,
+            # Confirmed starters (None pre-game; populated once game begins)
+            "home_sp_id": home_sp_id,
+            "away_sp_id": away_sp_id,
         }
 
     def get_completed_games(self, date: str) -> list[dict]:
@@ -148,17 +163,65 @@ class MLBStatsAdapter(DataAdapter):
     @staticmethod
     def _extract_pitcher_id(value) -> Optional[int]:
         """
-        statsapi.schedule() returns probable_pitcher as either:
-        - a dict {"id": 123, "fullName": "..."} in some versions
-        - a plain string name in others
-        - None if not yet announced
+        statsapi.schedule() returns probable_pitcher as:
+        - a dict {"id": 123, "fullName": "..."} in newer API versions
+        - a plain string full name in older/some API responses
+        - None / "" if not yet announced
+
+        String names are resolved to player IDs via statsapi.lookup_player()
+        with results cached for the process lifetime so we don't hammer the API.
         """
         if value is None or value == "":
             return None
         if isinstance(value, dict):
             return value.get("id")
-        # It's a string name — we can't get an ID from it, return None
-        return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        # String name — resolve via player lookup
+        return MLBStatsAdapter._lookup_player_id_by_name(str(value).strip())
+
+    @staticmethod
+    def _lookup_player_id_by_name(name: str) -> Optional[int]:
+        """
+        Resolve a player's full name to their MLB player ID.
+
+        Uses a module-level cache so each unique name is only looked up once
+        per process.  Returns None for genuinely new players with no entry yet
+        (e.g. debut game) — the prediction pipeline handles None SP gracefully.
+        """
+        if not name:
+            return None
+        if name in _player_id_cache:
+            return _player_id_cache[name]
+        try:
+            results = statsapi.lookup_player(name)
+        except Exception as exc:
+            logger.warning("Player ID lookup failed for %r: %s", name, exc)
+            _player_id_cache[name] = None
+            return None
+
+        if not results:
+            logger.warning("No MLB player found for name %r (may be a debut)", name)
+            _player_id_cache[name] = None
+            return None
+
+        # Prefer an exact case-insensitive full-name match
+        name_lower = name.lower()
+        for r in results:
+            if r.get("fullName", "").lower() == name_lower:
+                pid = int(r["id"])
+                _player_id_cache[name] = pid
+                return pid
+
+        # Multiple partial matches — take the first (active players rank higher
+        # in the statsapi response, so this is usually correct)
+        pid = int(results[0]["id"])
+        logger.debug(
+            "Ambiguous player name %r — using id=%d (%s); %d candidates",
+            name, pid, results[0].get("fullName"), len(results),
+        )
+        _player_id_cache[name] = pid
+        return pid
 
     def _sort_batting_order(self, team_data: dict, player_ids: list) -> list:
         """Sort player IDs by battingOrder field from the boxscore."""

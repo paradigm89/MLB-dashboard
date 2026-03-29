@@ -171,22 +171,28 @@ def _process_game_prediction(game: dict, game_date: str,
     game_pk = game["game_pk"]
     home_team_id = game.get("home_team_id")
     away_team_id = game.get("away_team_id")
-    home_sp_id = game.get("home_sp_id")
-    away_sp_id = game.get("away_sp_id")
     venue_id = game.get("venue_id")
     season = int(game_date[:4])
 
     if not home_team_id or not away_team_id:
         return False
 
-    # 1. Get or build lineups
+    # 1. Get or build lineups.
+    # fetch_and_store_lineups returns the best available SP IDs — it prefers
+    # the confirmed starter from the live boxscore (afternoon/evening) over
+    # the schedule's probable pitcher (morning), which in turn was resolved
+    # from a string name to an ID if needed.
     lineup_result = fetch_and_store_lineups(
-        game_pk, home_team_id, away_team_id, game_date, home_sp_id, away_sp_id
+        game_pk, home_team_id, away_team_id, game_date,
+        game.get("home_sp_id"), game.get("away_sp_id"),
     )
     home_lineup = lineup_result["home_lineup"]
     away_lineup = lineup_result["away_lineup"]
     home_confirmed = lineup_result["home_confirmed"]
     away_confirmed = lineup_result["away_confirmed"]
+    # Use the best SP ID available: boxscore confirmed > schedule probable > None
+    home_sp_id = lineup_result.get("home_sp_id") or game.get("home_sp_id")
+    away_sp_id = lineup_result.get("away_sp_id") or game.get("away_sp_id")
 
     # 2. Build game-level features
     features = build_prediction_features(
