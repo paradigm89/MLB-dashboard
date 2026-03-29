@@ -2,7 +2,6 @@
  * RunDistributionChart — shows the P10/median/P90 run range for each team
  * as a simple range visualization.
  */
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from "recharts";
 
 interface RunDist {
   median: number;
