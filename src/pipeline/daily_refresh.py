@@ -238,8 +238,14 @@ def _process_game_prediction(game: dict, game_date: str,
     away_batter_xwobas = []
     if batter_model is not None:
         try:
-            home_matchup = _build_lineup_matchup(home_lineup, away_sp_id, season)
-            away_matchup = _build_lineup_matchup(away_lineup, home_sp_id, season)
+            home_matchup = _build_lineup_matchup(
+                home_lineup, away_sp_id, season,
+                before_date=game_date, opposing_team_id=away_team_id,
+            )
+            away_matchup = _build_lineup_matchup(
+                away_lineup, home_sp_id, season,
+                before_date=game_date, opposing_team_id=home_team_id,
+            )
             home_lineup_xwoba = home_matchup.get("lineup_xwoba_score")
             away_lineup_xwoba = away_matchup.get("lineup_xwoba_score")
             home_batter_xwobas = [s["xwoba"] for s in home_matchup.get("batter_matchup_scores", [])]

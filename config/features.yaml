@@ -39,7 +39,10 @@ team_rolling:
   - pythagorean_win_pct          # RS^1.83 / (RS^1.83 + RA^1.83) over last 30g
   - run_diff_slope_10g           # linear slope of run differential last 10 games (momentum)
   - bullpen_era_7d               # bullpen ERA, last 7 days
-  - bullpen_ip_3d                # bullpen IP used in last 3 days (availability)
+  - bullpen_ip_3d                # bullpen IP used in last 3 days (availability/fatigue)
+  - bullpen_xfip_season          # IP-weighted xFIP of team's relievers (gs=0 in FanGraphs)
+  - bullpen_k_pct_season         # IP-weighted K% of team's relievers
+  - bullpen_pct_lhp              # fraction of bullpen IP thrown by LH relievers
   - team_drs_30g                 # team Defensive Runs Saved, last 30 games
   - lineup_xwoba_score           # weighted xwOBA of projected/confirmed lineup
 
@@ -96,3 +99,8 @@ batter_matchup:
   - pitcher_hand_l               # 1=LHP, 0=RHP
   - n_pa_matchup                 # historical PA between this pair (for Bayesian blend weight)
   - batting_order_position       # 1-9 (used for lineup aggregation weighting)
+  # Bullpen matchup component (blended with SP component by expected starter IP)
+  - batter_xwoba_vs_rhp_relief   # batter xwOBA vs. RH relievers (Bayesian-blended, last 3 seasons)
+  - batter_xwoba_vs_lhp_relief   # batter xwOBA vs. LH relievers (Bayesian-blended, last 3 seasons)
+  - sp_expected_ip               # starter's expected IP from rolling 5-start average
+  - bullpen_blend_weight         # fraction of game expected from bullpen (1 - sp_ip/9, capped 0.15–0.50)

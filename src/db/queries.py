@@ -81,6 +81,76 @@ def get_statcast_matchup(session: Session, batter_id: int, pitcher_id: int) -> p
     return _to_df(rows)
 
 
+def get_team_relievers(
+    session: Session, team_id: int, season: int, min_g: int = 5
+) -> pd.DataFrame:
+    """
+    Return FanGraphs pitching stats for relievers on a given team.
+    Relievers are identified as pitchers with gs=0 (pure relievers) and at
+    least min_g appearances, which filters out emergency call-ups.
+    """
+    rows = (
+        session.query(PitchingStats)
+        .filter(
+            PitchingStats.team_id == team_id,
+            PitchingStats.season == season,
+            PitchingStats.g >= min_g,
+            PitchingStats.gs == 0,
+        )
+        .all()
+    )
+    return _to_df(rows)
+
+
+def get_all_reliever_ids(
+    session: Session, min_season: int, min_g: int = 5
+) -> list[int]:
+    """
+    Return all pitcher IDs known as pure relievers (gs=0) across recent seasons.
+    Used to filter Statcast data to relief appearances for batter matchup blending.
+    """
+    rows = (
+        session.query(PitchingStats.player_id)
+        .filter(
+            PitchingStats.season >= min_season,
+            PitchingStats.g >= min_g,
+            PitchingStats.gs == 0,
+        )
+        .distinct()
+        .all()
+    )
+    return [r[0] for r in rows]
+
+
+def get_statcast_batter_vs_relievers(
+    session: Session,
+    batter_id: int,
+    pitcher_hand: str,
+    reliever_ids: list[int],
+    min_season: int,
+) -> pd.DataFrame:
+    """
+    Return all Statcast pitches for a batter against known relievers of the
+    given handedness, filtered to rows with an xwOBA value (i.e. balls in play
+    or strikeouts with an estimated value).  Used for Bayesian-blended
+    batter-vs-reliever xwOBA.
+    """
+    if not reliever_ids:
+        return pd.DataFrame()
+    rows = (
+        session.query(StatcastPitch)
+        .filter(
+            StatcastPitch.batter_id == batter_id,
+            StatcastPitch.pitcher_id.in_(reliever_ids),
+            StatcastPitch.p_throws == pitcher_hand,
+            StatcastPitch.season >= min_season,
+            StatcastPitch.estimated_woba_using_speedangle.isnot(None),
+        )
+        .all()
+    )
+    return _to_df(rows)
+
+
 def get_park_factor(session: Session, venue_id: int, season: int) -> Optional[ParkFactor]:
     return (
         session.query(ParkFactor)

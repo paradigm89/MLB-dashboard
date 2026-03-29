@@ -217,12 +217,22 @@ def _build_team_rolling_features(team_id: int, before_date: str) -> dict:
     else:
         features["run_diff_slope_10g"] = 0.0
 
-    # Remaining features are complex to compute from game log alone
-    # (require joining pitching stats); use placeholder for now
-    # These are populated properly when season pitching stats are available
+    # Aggregate batting/pitching rate stats require joining per-game box scores
+    # which aren't stored at that granularity; leave as None for now.
     for k in ["ops_30g", "era_30g", "whip_30g", "fip_30g", "wrc_plus_30g",
-              "bullpen_era_7d", "bullpen_ip_3d", "team_drs_30g", "lineup_xwoba_score"]:
+              "team_drs_30g", "lineup_xwoba_score"]:
         features[k] = None
+
+    # Bullpen features — computed from FanGraphs pitching stats (gs=0 relievers)
+    # and recent Statcast pitch counts for fatigue estimation.
+    season = int(before_date[:4])
+    from src.pipeline.matchups import get_team_bullpen_features
+    bp = get_team_bullpen_features(team_id, season, before_date)
+    features["bullpen_xfip_season"] = bp.get("bullpen_xfip_season")
+    features["bullpen_k_pct_season"] = bp.get("bullpen_k_pct_season")
+    features["bullpen_pct_lhp"] = bp.get("bullpen_pct_lhp")
+    features["bullpen_era_7d"] = bp.get("bullpen_xfip_season")  # xFIP is a better ERA proxy
+    features["bullpen_ip_3d"] = bp.get("bullpen_ip_3d")
 
     return features
 

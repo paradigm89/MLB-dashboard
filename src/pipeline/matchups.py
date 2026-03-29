@@ -23,16 +23,30 @@ import yaml
 from pathlib import Path
 
 from src.db.connection import get_db
-from src.db.queries import get_batting_stats, get_pitching_stats, get_statcast_matchup
+from src.db.queries import (
+    get_batting_stats,
+    get_pitching_stats,
+    get_statcast_matchup,
+    get_all_reliever_ids,
+    get_statcast_batter_vs_relievers,
+    get_team_relievers,
+)
 
 logger = logging.getLogger(__name__)
 
 _CONFIG_PATH = Path(__file__).parents[2] / "config" / "models.yaml"
 
 # Batting order position weights (leadoff batters see more PAs)
-# Approximate relative PA weight by lineup slot
 _BATTING_ORDER_WEIGHTS = {1: 1.15, 2: 1.12, 3: 1.10, 4: 1.08, 5: 1.05,
                            6: 1.00, 7: 0.97, 8: 0.94, 9: 0.91}
+
+# League-average xwOBA vs. relievers is slightly lower than vs. starters
+# (~.310 vs. ~.320) because relievers tend to throw harder and shorter outings.
+_RELIEF_PRIOR_XWOBA = 0.310
+
+# Module-level cache: reliever player ID sets, keyed by min_season.
+# Populated once per process (re-queried only when a new season key is needed).
+_reliever_id_cache: dict[int, list[int]] = {}
 
 
 def load_shrinkage_config() -> dict:
@@ -106,34 +120,89 @@ def get_batter_matchup_features(batter_id: int, pitcher_id: int,
     return features
 
 
-def build_lineup_matchup_features(lineup_player_ids: list[int], pitcher_id: int,
-                                    season: int) -> dict:
+def build_lineup_matchup_features(
+    lineup_player_ids: list[int],
+    pitcher_id: int,
+    season: int,
+    before_date: Optional[str] = None,
+    opposing_team_id: Optional[int] = None,
+) -> dict:
     """
-    Aggregate individual batter matchup scores into a lineup-level xwOBA score.
-    Weights by batting order position (leadoff sees more PAs).
+    Aggregate individual batter matchup scores into a lineup-level xwOBA score,
+    blending the starter component and bullpen component by expected innings.
 
-    Returns:
-        dict with lineup_xwoba_score and individual batter scores
+    Blend logic
+    -----------
+    Modern MLB starters average ~5.5 IP.  Each batter's final xwOBA is:
+
+        xwoba = sp_weight * xwoba_vs_sp  +  relief_weight * xwoba_vs_relief
+
+    where sp_weight = min(expected_sp_ip / 9, 0.85) — capped so the bullpen
+    always contributes at least 15% of the expected value.
+
+    The relief component is itself a blend of the batter's historical xwOBA
+    vs. RH and LH relievers, weighted by the opposing bullpen's handedness
+    split (defaults to league average 70% RHP / 30% LHP if unknown).
+
+    Returns
+    -------
+    dict with lineup_xwoba_score, sp_weight, relief_weight, and per-batter scores
+    (each score now includes xwoba_vs_sp and xwoba_vs_relief breakdowns).
     """
     if not lineup_player_ids:
         return {"lineup_xwoba_score": None, "batter_matchup_scores": []}
+
+    if before_date is None:
+        from datetime import date as _date
+        before_date = str(_date.today())
+
+    # --- Starter/bullpen blend weights ---
+    sp_rolling = get_pitcher_rolling_stats(pitcher_id, before_date)
+    expected_sp_ip = sp_rolling.get("ip_rolling5") or 5.5
+    sp_weight = float(np.clip(expected_sp_ip / 9.0, 0.50, 0.85))
+    relief_weight = 1.0 - sp_weight
+
+    # --- Opposing bullpen handedness split ---
+    if opposing_team_id:
+        bullpen_feats = get_team_bullpen_features(opposing_team_id, season, before_date)
+        bullpen_pct_lhp = bullpen_feats.get("bullpen_pct_lhp", 0.30)
+    else:
+        bullpen_pct_lhp = 0.30  # league average
+    bullpen_pct_rhp = 1.0 - bullpen_pct_lhp
 
     scores = []
     total_weight = 0.0
 
     for pos, batter_id in enumerate(lineup_player_ids[:9], start=1):
+        # Starter matchup (existing logic)
         features = get_batter_matchup_features(batter_id, pitcher_id, batting_order_pos=pos)
-        xwoba = features.get("batter_xwoba_season")  # fallback to season if matchup is sparse
+        xwoba_vs_sp = _weighted_blend(features) or features.get("batter_xwoba_season")
 
-        # Use blended matchup xwOBA if we have reasonable data
-        blended = _weighted_blend(features)
-        if blended is not None:
-            xwoba = blended
+        # Bullpen matchup (new)
+        xwoba_vs_rhp_rel = get_batter_vs_relief_xwoba(batter_id, "R", season)
+        xwoba_vs_lhp_rel = get_batter_vs_relief_xwoba(batter_id, "L", season)
+        xwoba_vs_relief = (
+            bullpen_pct_rhp * xwoba_vs_rhp_rel
+            + bullpen_pct_lhp * xwoba_vs_lhp_rel
+        )
+
+        # Final blend
+        if xwoba_vs_sp is not None:
+            xwoba = sp_weight * xwoba_vs_sp + relief_weight * xwoba_vs_relief
+        else:
+            xwoba = xwoba_vs_relief
 
         weight = _BATTING_ORDER_WEIGHTS.get(pos, 1.0)
-        if xwoba is not None:
-            scores.append({"pos": pos, "batter_id": batter_id, "xwoba": xwoba, "weight": weight})
-            total_weight += weight
+        scores.append({
+            "pos": pos,
+            "batter_id": batter_id,
+            "xwoba": xwoba,
+            "xwoba_vs_sp": xwoba_vs_sp,
+            "xwoba_vs_rhp_relief": xwoba_vs_rhp_rel,
+            "xwoba_vs_lhp_relief": xwoba_vs_lhp_rel,
+            "weight": weight,
+        })
+        total_weight += weight
 
     if not scores:
         return {"lineup_xwoba_score": None, "batter_matchup_scores": []}
@@ -141,7 +210,132 @@ def build_lineup_matchup_features(lineup_player_ids: list[int], pitcher_id: int,
     lineup_xwoba = sum(s["xwoba"] * s["weight"] for s in scores) / total_weight
     return {
         "lineup_xwoba_score": lineup_xwoba,
+        "sp_weight": round(sp_weight, 3),
+        "relief_weight": round(relief_weight, 3),
+        "expected_sp_ip": round(expected_sp_ip, 1),
         "batter_matchup_scores": scores,
+    }
+
+
+def get_batter_vs_relief_xwoba(
+    batter_id: int,
+    pitcher_hand: str,
+    season: int,
+    k: int = 150,
+) -> float:
+    """
+    Bayesian-blended xwOBA for a batter against RH or LH relievers.
+
+    Uses the full historical Statcast record for this batter against any pitcher
+    identified as a pure reliever (gs=0 in FanGraphs) over the last three seasons.
+    Blends toward the league-average reliever xwOBA (_RELIEF_PRIOR_XWOBA = .310)
+    when the sample is small — typical for debut or rarely-used platoon players.
+
+    k=150 means a batter needs ~150 tracked PA vs. relievers before their
+    observed rate is weighted 50/50 with the league prior.
+    """
+    min_season = max(season - 3, 2019)
+
+    # Populate the module-level cache once per min_season value
+    if min_season not in _reliever_id_cache:
+        with get_db() as session:
+            _reliever_id_cache[min_season] = get_all_reliever_ids(session, min_season)
+    reliever_ids = _reliever_id_cache[min_season]
+
+    if not reliever_ids:
+        return _RELIEF_PRIOR_XWOBA
+
+    with get_db() as session:
+        df = get_statcast_batter_vs_relievers(
+            session, batter_id, pitcher_hand, reliever_ids, min_season
+        )
+
+    n = len(df)
+    if n == 0:
+        return _RELIEF_PRIOR_XWOBA
+
+    observed = float(df["estimated_woba_using_speedangle"].mean())
+    return (n * observed + k * _RELIEF_PRIOR_XWOBA) / (n + k)
+
+
+def get_team_bullpen_features(
+    team_id: int,
+    season: int,
+    before_date: str,
+) -> dict:
+    """
+    Compute team bullpen quality features for use as model inputs.
+
+    bullpen_xfip_season  -- IP-weighted xFIP of the team's pure relievers
+    bullpen_k_pct_season -- IP-weighted K% of the team's pure relievers
+    bullpen_pct_lhp      -- fraction of bullpen IP from LH arms (handedness split)
+    bullpen_ip_3d        -- estimated innings used by the bullpen in the last 3 days
+                           (proxy for fatigue/availability; derived from pitch counts)
+
+    Relievers are identified as pitchers with gs=0 and ≥5 appearances in the
+    FanGraphs season stats, which filters out emergency starters while including
+    all true bullpen arms.
+    """
+    null_result = {
+        "bullpen_xfip_season": None,
+        "bullpen_k_pct_season": None,
+        "bullpen_pct_lhp": 0.30,
+        "bullpen_ip_3d": None,
+    }
+
+    with get_db() as session:
+        rel_df = get_team_relievers(session, team_id, season)
+
+    if rel_df.empty:
+        return null_result
+
+    total_ip = rel_df["ip"].fillna(0).sum()
+    if total_ip == 0:
+        return null_result
+
+    # IP-weighted xFIP
+    valid = rel_df[rel_df["xfip"].notna() & (rel_df["ip"].fillna(0) > 0)]
+    bullpen_xfip = (
+        float((valid["xfip"] * valid["ip"]).sum() / valid["ip"].sum())
+        if not valid.empty else None
+    )
+
+    # IP-weighted K%
+    valid_k = rel_df[rel_df["k_pct"].notna() & (rel_df["ip"].fillna(0) > 0)]
+    bullpen_kpct = (
+        float((valid_k["k_pct"] * valid_k["ip"]).sum() / valid_k["ip"].sum())
+        if not valid_k.empty else None
+    )
+
+    # Handedness split
+    lhp_ip = rel_df[rel_df["throws"] == "L"]["ip"].fillna(0).sum()
+    bullpen_pct_lhp = float(lhp_ip / total_ip) if total_ip > 0 else 0.30
+
+    # Bullpen IP used in last 3 days (fatigue / availability signal)
+    reliever_ids = rel_df["player_id"].dropna().astype(int).tolist()
+    cutoff = (pd.Timestamp(before_date) - pd.Timedelta(days=3)).strftime("%Y-%m-%d")
+    bullpen_ip_3d = 0.0
+    if reliever_ids:
+        with get_db() as session:
+            from sqlalchemy import text
+            row = session.execute(
+                text("""
+                    SELECT COUNT(*) AS n_pitches
+                    FROM statcast_pitches
+                    WHERE pitcher_id = ANY(:pids)
+                      AND game_date >= :cutoff
+                      AND game_date < :before_date
+                """),
+                {"pids": reliever_ids, "cutoff": cutoff, "before_date": before_date},
+            ).fetchone()
+        # ~15 pitches per inning is the standard approximation
+        bullpen_ip_3d = float(row[0]) / 15.0 if row and row[0] else 0.0
+
+    return {
+        "bullpen_xfip_season": bullpen_xfip,
+        "bullpen_k_pct_season": bullpen_kpct,
+        "bullpen_pct_lhp": bullpen_pct_lhp,
+        "bullpen_ip_3d": bullpen_ip_3d,
     }
 
 
