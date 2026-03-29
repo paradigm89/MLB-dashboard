@@ -47,7 +47,7 @@ export default function WinProbBar({
         {!homeConfirmed && <span className="badge projected">{homeAbbr} lineup projected</span>}
         {generatedAt && (
           <span className="ts">
-            Updated {new Date(generatedAt).toLocaleTimeString("en-US", {
+            Updated {new Date(generatedAt.endsWith("Z") ? generatedAt : generatedAt + "Z").toLocaleTimeString("en-US", {
               hour: "numeric",
               minute: "2-digit",
             })}
