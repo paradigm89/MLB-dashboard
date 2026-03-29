@@ -53,8 +53,13 @@ class PybaseballAdapter(DataAdapter):
         return self._normalize_batting(df, season)
 
     def _normalize_batting(self, df: pd.DataFrame, season: int) -> pd.DataFrame:
+        # Use MLBAM ID (matches MLB Stats API / statsapi) so player lookups work
+        # across the whole pipeline. IDfg is FanGraphs-only and doesn't match.
+        if "MLBAM" in df.columns:
+            df = df.rename(columns={"MLBAM": "player_id"})
+        elif "IDfg" in df.columns:
+            df = df.rename(columns={"IDfg": "player_id"})
         col_map = {
-            "IDfg": "player_id",
             "Name": "player_name",
             "Team": "team_abbr",
             "PA": "pa",
@@ -113,8 +118,12 @@ class PybaseballAdapter(DataAdapter):
         return self._normalize_pitching(df, season)
 
     def _normalize_pitching(self, df: pd.DataFrame, season: int) -> pd.DataFrame:
+        # Use MLBAM ID to match statsapi player IDs used everywhere else
+        if "MLBAM" in df.columns:
+            df = df.rename(columns={"MLBAM": "player_id"})
+        elif "IDfg" in df.columns:
+            df = df.rename(columns={"IDfg": "player_id"})
         col_map = {
-            "IDfg": "player_id",
             "Name": "player_name",
             "Team": "team_abbr",
             "W": "w",
@@ -168,8 +177,11 @@ class PybaseballAdapter(DataAdapter):
             logger.error("pybaseball fielding_stats failed for %d: %s", season, exc)
             return pd.DataFrame()
 
+        if "MLBAM" in df.columns:
+            df = df.rename(columns={"MLBAM": "player_id"})
+        elif "IDfg" in df.columns:
+            df = df.rename(columns={"IDfg": "player_id"})
         col_map = {
-            "IDfg": "player_id",
             "Name": "player_name",
             "Team": "team_abbr",
             "Pos": "position",
