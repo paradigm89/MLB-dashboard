@@ -9,6 +9,14 @@ export interface TeamInfo { team_id: number; team_abbr: string }
 export interface PitcherInfo { pitcher_id: number; pitcher_name?: string; throws?: string }
 export interface RunDistribution { median: number; p10: number; p90: number }
 
+export interface BatterMatchup {
+  batter_id: number;
+  batting_order: number;
+  projected_xwoba?: number;
+  xwoba_vs_hand?: number;
+  sample_pa: number;
+}
+
 export interface GamePrediction {
   game_pk: number;
   game_date: string;
@@ -23,6 +31,8 @@ export interface GamePrediction {
   home_lineup_xwoba?: number;
   away_lineup_xwoba?: number;
   lineup_edge?: number;
+  home_batter_matchups?: BatterMatchup[];
+  away_batter_matchups?: BatterMatchup[];
   home_lineup_confirmed: boolean;
   away_lineup_confirmed: boolean;
   simulation_method: string;

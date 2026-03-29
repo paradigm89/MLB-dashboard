@@ -166,22 +166,18 @@ export default function GameDetailPage() {
             )}
 
             {/* ── Batter matchup tables ── */}
-            {/* These would be populated by an additional endpoint when available */}
             <section className="panel batter-section">
               <h2>Batter Matchups</h2>
-              <p className="note">
-                Batter-level xwOBA breakdowns load from /api/predict/game?game_pk={pred.game_pk}&include_batters=true
-              </p>
               <div className="batter-tables">
                 <BatterMatchupTable
-                  batters={[]}
+                  batters={pred.away_batter_matchups}
                   teamAbbr={pred.away_team.team_abbr}
-                  vsSpName={pred.home_sp?.pitcher_name ?? `SP ${pred.home_sp?.pitcher_id ?? "TBD"}`}
+                  vsSpName={pred.home_sp?.pitcher_name ?? (pred.home_sp ? `#${pred.home_sp.pitcher_id}` : undefined)}
                 />
                 <BatterMatchupTable
-                  batters={[]}
+                  batters={pred.home_batter_matchups}
                   teamAbbr={pred.home_team.team_abbr}
-                  vsSpName={pred.away_sp?.pitcher_name ?? `SP ${pred.away_sp?.pitcher_id ?? "TBD"}`}
+                  vsSpName={pred.away_sp?.pitcher_name ?? (pred.away_sp ? `#${pred.away_sp.pitcher_id}` : undefined)}
                 />
               </div>
             </section>

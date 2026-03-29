@@ -1,20 +1,17 @@
 /**
- * BatterMatchupTable — sortable table of lineup batter matchup xwOBA scores.
+ * BatterMatchupTable — lineup batter matchup xwOBA scores vs. opposing SP.
  * Green = strong vs. opponent pitcher; red = weak.
  */
-interface BatterScore {
-  pos: number;
-  batter_id: number;
-  xwoba: number;
-}
+import { BatterMatchup } from "@/lib/api";
 
 interface Props {
-  batters: BatterScore[];
+  batters?: BatterMatchup[];
   teamAbbr: string;
   vsSpName?: string;
 }
 
-function xwobaColor(xwoba: number): string {
+function xwobaColor(xwoba?: number): string {
+  if (xwoba == null) return "#666";
   if (xwoba >= 0.380) return "#4caf50";
   if (xwoba >= 0.330) return "#8bc34a";
   if (xwoba >= 0.300) return "#fff";
@@ -22,12 +19,16 @@ function xwobaColor(xwoba: number): string {
   return "#f44336";
 }
 
+function fmt(v?: number) {
+  return v != null ? v.toFixed(3) : "—";
+}
+
 export default function BatterMatchupTable({ batters, teamAbbr, vsSpName }: Props) {
   if (!batters || batters.length === 0) {
     return <div className="empty">No batter matchup data</div>;
   }
 
-  const sorted = [...batters].sort((a, b) => a.pos - b.pos);
+  const sorted = [...batters].sort((a, b) => a.batting_order - b.batting_order);
 
   return (
     <div>
@@ -38,18 +39,20 @@ export default function BatterMatchupTable({ batters, teamAbbr, vsSpName }: Prop
         <thead>
           <tr>
             <th>#</th>
-            <th>Batter ID</th>
-            <th>xwOBA</th>
+            <th>Player ID</th>
+            <th title="Projected xwOBA vs. this pitcher (season avg blended with matchup history)">xwOBA</th>
+            <th title="Sample size: career plate appearances vs. this pitcher">PA vs. SP</th>
           </tr>
         </thead>
         <tbody>
           {sorted.map((b) => (
-            <tr key={b.pos}>
-              <td className="pos">{b.pos}</td>
+            <tr key={b.batting_order}>
+              <td className="pos">{b.batting_order}</td>
               <td>{b.batter_id}</td>
-              <td style={{ color: xwobaColor(b.xwoba), fontWeight: 600 }}>
-                {b.xwoba.toFixed(3)}
+              <td style={{ color: xwobaColor(b.projected_xwoba), fontWeight: 600 }}>
+                {fmt(b.projected_xwoba)}
               </td>
+              <td className="pa">{b.sample_pa > 0 ? b.sample_pa : "—"}</td>
             </tr>
           ))}
         </tbody>
@@ -58,10 +61,11 @@ export default function BatterMatchupTable({ batters, teamAbbr, vsSpName }: Prop
       <style jsx>{`
         .title { font-size: 14px; color: #ccc; margin: 0 0 8px; }
         .table { width: 100%; border-collapse: collapse; font-size: 13px; }
-        th { text-align: left; color: #888; padding: 4px 8px; border-bottom: 1px solid #333; }
+        th { text-align: left; color: #888; padding: 4px 8px; border-bottom: 1px solid #333; font-weight: 400; }
         td { padding: 4px 8px; color: #ddd; }
         tr:hover td { background: #1a2a4a; }
-        .pos { color: #888; }
+        .pos { color: #888; width: 24px; }
+        .pa { color: #666; }
         .empty { color: #555; font-size: 13px; }
       `}</style>
     </div>

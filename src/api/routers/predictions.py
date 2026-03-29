@@ -24,7 +24,7 @@ from src.api.schemas import (
     TodayScheduleResponse,
 )
 from src.db.connection import get_db
-from src.db.queries import get_game, get_last_refresh, get_prediction, get_today_predictions
+from src.db.queries import get_game, get_last_refresh, get_lineup, get_prediction, get_today_predictions
 from src.pipeline.adapters.mlb_stats import MLBStatsAdapter
 from src.pipeline.daily_refresh import _load_active_models
 from src.pipeline.features import build_prediction_features
@@ -57,14 +57,37 @@ async def predict_game(
         with get_db() as session:
             stored = get_prediction(session, game_pk)
             if stored:
-                # Resolve team IDs from the games table if not passed as params
-                if not home_team_id or not away_team_id:
-                    game_row = get_game(session, game_pk)
-                    h_id = home_team_id or (game_row.home_team_id if game_row else 0)
-                    a_id = away_team_id or (game_row.away_team_id if game_row else 0)
-                else:
-                    h_id, a_id = home_team_id, away_team_id
-                return _prediction_row_to_schema(stored, h_id, a_id)
+                # Resolve team IDs and lineup/pitcher info from DB while session is open
+                game_row = get_game(session, game_pk)
+                h_id = home_team_id or (game_row.home_team_id if game_row else 0)
+                a_id = away_team_id or (game_row.away_team_id if game_row else 0)
+
+                # Fetch lineup rows to get SP info and batting orders
+                home_lineup = get_lineup(session, game_pk, h_id) if h_id else None
+                away_lineup = get_lineup(session, game_pk, a_id) if a_id else None
+
+                home_sp_id   = home_lineup.sp_id if home_lineup else None
+                home_sp_name = home_lineup.sp_name if home_lineup else None
+                away_sp_id   = away_lineup.sp_id if away_lineup else None
+                away_sp_name = away_lineup.sp_name if away_lineup else None
+                home_order   = [int(x) for x in home_lineup.batting_order.split(",") if x.strip()] if (home_lineup and home_lineup.batting_order) else []
+                away_order   = [int(x) for x in away_lineup.batting_order.split(",") if x.strip()] if (away_lineup and away_lineup.batting_order) else []
+
+                pred_schema = _prediction_row_to_schema(stored, h_id, a_id)
+
+                # Attach pitcher info
+                if home_sp_id:
+                    pred_schema.home_sp = PitcherInfo(pitcher_id=home_sp_id, pitcher_name=home_sp_name)
+                if away_sp_id:
+                    pred_schema.away_sp = PitcherInfo(pitcher_id=away_sp_id, pitcher_name=away_sp_name)
+
+                # Attach batter matchup scores
+                if home_order and away_sp_id:
+                    pred_schema.home_batter_matchups = _build_batter_matchups(home_order, away_sp_id)
+                if away_order and home_sp_id:
+                    pred_schema.away_batter_matchups = _build_batter_matchups(away_order, home_sp_id)
+
+                return pred_schema
 
     # Fall back to on-demand prediction
     try:
@@ -258,3 +281,22 @@ def _prediction_row_to_schema(pred, home_team_id: int, away_team_id: int) -> Gam
         away_lineup_confirmed=pred.away_lineup_confirmed or False,
         prediction_generated_at=pred.generated_at,
     )
+
+
+def _build_batter_matchups(batter_ids: list[int], pitcher_id: int) -> list[dict]:
+    """Fetch xwOBA prediction for each batter in the lineup vs the opposing SP."""
+    results = []
+    for pos, batter_id in enumerate(batter_ids, start=1):
+        try:
+            features = get_batter_matchup_features(batter_id, pitcher_id, pos)
+            results.append({
+                "batter_id": batter_id,
+                "batting_order": pos,
+                "projected_xwoba": features.get("batter_xwoba_season"),
+                "xwoba_vs_hand": features.get("batter_xwoba_vs_hand"),
+                "sample_pa": features.get("n_pa_matchup", 0),
+            })
+        except Exception:
+            results.append({"batter_id": batter_id, "batting_order": pos,
+                            "projected_xwoba": None, "xwoba_vs_hand": None, "sample_pa": 0})
+    return results

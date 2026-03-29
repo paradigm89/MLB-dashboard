@@ -65,27 +65,27 @@ async def get_system_status():
             correlation_xwoba=mv.correlation_xwoba,
         )
 
-    # Active errors: failed OR partial refreshes in the last 24h (partial = completed with QC warnings)
+    # Active errors: only from the MOST RECENT refresh of each type, if it had issues
     active_errors = []
     with get_db() as session:
         from sqlalchemy import text
         failed = session.execute(
             text("""
-                SELECT refresh_type, started_at, error_message
+                SELECT DISTINCT ON (refresh_type)
+                    refresh_type, started_at, error_message, status
                 FROM refresh_log
-                WHERE status IN ('failed', 'partial')
-                  AND started_at > NOW() - INTERVAL '24 hours'
-                  AND error_message IS NOT NULL
-                ORDER BY started_at DESC
-                LIMIT 10
+                WHERE started_at > NOW() - INTERVAL '24 hours'
+                ORDER BY refresh_type, started_at DESC
             """)
         ).fetchall()
     for row in failed:
-        active_errors.append(ActiveError(
-            type=row[0],
-            message=row[2] or "Unknown error",
-            occurred_at=row[1],
-        ))
+        # Only surface as an error if the most recent run actually had issues
+        if row[3] in ("failed", "partial") and row[2]:
+            active_errors.append(ActiveError(
+                type=row[0],
+                message=row[2],
+                occurred_at=row[1],
+            ))
 
     model_versions = [v for v in [
         _model_version(run_mv),

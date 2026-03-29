@@ -65,6 +65,10 @@ class GamePrediction(BaseModel):
     away_lineup_xwoba: Optional[float] = None
     lineup_edge: Optional[float] = Field(None, description="home lineup xwOBA minus away lineup xwOBA")
 
+    # Per-batter matchup scores (populated on game detail page requests)
+    home_batter_matchups: Optional[list] = None
+    away_batter_matchups: Optional[list] = None
+
     # Data quality indicators
     home_lineup_confirmed: bool = False
     away_lineup_confirmed: bool = False
