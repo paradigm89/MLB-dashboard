@@ -176,25 +176,40 @@ def _upsert_games(games: list[dict]) -> None:
 def _ingest_statcast_season(pb: PybaseballAdapter, season: int) -> None:
     """
     Fetch Statcast data for a full season in STATCAST_CHUNK_DAYS-day windows.
-    Tracks progress: skips chunks already present in DB.
+
+    Each chunk is checked individually — if it already has rows it is skipped,
+    otherwise it is fetched.  This handles gaps correctly (e.g. a mid-season
+    interruption leaves empty chunks even though later chunks have data, which
+    breaks a simple MAX(game_date) resume approach).
     """
+    from sqlalchemy import text as _text
+
     start = date(season, 3, 28)
     end = date(season, 11, 5)
     current = start
 
-    with get_db() as session:
-        last_date = _get_last_statcast_date(session, season)
-
-    if last_date:
-        # Resume from day after last successfully ingested date
-        resume_from = date.fromisoformat(last_date) + timedelta(days=1)
-        if resume_from > current:
-            current = resume_from
-            logger.info("Resuming Statcast ingest for %d from %s", season, current)
-
     while current <= end:
         chunk_end = min(current + timedelta(days=STATCAST_CHUNK_DAYS - 1), end)
-        _ingest_statcast_range(pb, str(current), str(chunk_end))
+
+        # Skip this chunk only if it already has data in the DB
+        with get_db() as session:
+            existing = session.execute(
+                _text(
+                    "SELECT COUNT(*) FROM statcast_pitches "
+                    "WHERE season = :season "
+                    "AND game_date >= :s AND game_date <= :e"
+                ),
+                {"season": season, "s": str(current), "e": str(chunk_end)},
+            ).scalar()
+
+        if existing:
+            logger.info(
+                "Skipping Statcast chunk %s–%s (%d rows already present)",
+                current, chunk_end, existing,
+            )
+        else:
+            _ingest_statcast_range(pb, str(current), str(chunk_end))
+
         current = chunk_end + timedelta(days=1)
 
 
