@@ -65,7 +65,7 @@ async def get_system_status():
             correlation_xwoba=mv.correlation_xwoba,
         )
 
-    # Active errors: any refresh that failed in the last 24h
+    # Active errors: failed OR partial refreshes in the last 24h (partial = completed with QC warnings)
     active_errors = []
     with get_db() as session:
         from sqlalchemy import text
@@ -73,10 +73,11 @@ async def get_system_status():
             text("""
                 SELECT refresh_type, started_at, error_message
                 FROM refresh_log
-                WHERE status = 'failed'
+                WHERE status IN ('failed', 'partial')
                   AND started_at > NOW() - INTERVAL '24 hours'
+                  AND error_message IS NOT NULL
                 ORDER BY started_at DESC
-                LIMIT 5
+                LIMIT 10
             """)
         ).fetchall()
     for row in failed:
