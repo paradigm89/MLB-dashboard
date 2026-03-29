@@ -34,7 +34,6 @@ from src.pipeline.ingest import run_daily_ingest
 from src.pipeline.lineups import (
     check_and_update_confirmed_lineups,
     fetch_and_store_lineups,
-    build_lineup_matchup_features,
 )
 from src.pipeline.matchups import build_lineup_matchup_features as _build_lineup_matchup
 from src.models.win_probability import compute_win_probability
