@@ -42,7 +42,8 @@ import random
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
-from sqlalchemy import func
+import pandas as pd
+from sqlalchemy import func, text
 
 from src.db.connection import get_db
 from src.db.schema import BattingStats, FieldingStats, Game, PitchingStats, StatcastPitch
@@ -562,8 +563,9 @@ def spot_check_pitcher_stats(season: int, n: int = 3) -> CheckResult:
     except Exception as exc:
         return CheckResult("pitcher_stat_spot", WARN, f"FanGraphs fetch failed: {exc}")
 
-    # FanGraphs uses IDfg as the player identifier
-    fg_by_id = {int(row["IDfg"]): row for _, row in fg.iterrows() if "IDfg" in fg.columns}
+    # Use MLBAM ID to match the pipeline's player_id (same ID system as statsapi)
+    id_col = "MLBAM" if "MLBAM" in fg.columns else "IDfg"
+    fg_by_id = {int(row[id_col]): row for _, row in fg.iterrows() if id_col in fg.columns and pd.notna(row[id_col])}
 
     mismatches: list[str] = []
     matched = 0
@@ -634,7 +636,8 @@ def spot_check_batter_stats(season: int, n: int = 3) -> CheckResult:
     except Exception as exc:
         return CheckResult("batter_stat_spot", WARN, f"FanGraphs fetch failed: {exc}")
 
-    fg_by_id = {int(row["IDfg"]): row for _, row in fg.iterrows() if "IDfg" in fg.columns}
+    id_col = "MLBAM" if "MLBAM" in fg.columns else "IDfg"
+    fg_by_id = {int(row[id_col]): row for _, row in fg.iterrows() if id_col in fg.columns and pd.notna(row[id_col])}
 
     mismatches: list[str] = []
     matched = 0
@@ -664,6 +667,75 @@ def spot_check_batter_stats(season: int, n: int = 3) -> CheckResult:
     return CheckResult(
         "batter_stat_spot", status,
         f"{matched}/{len(sample)} match; issues: " + "; ".join(mismatches[:2]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Check 10: Player ID linkage (catches IDfg vs MLBAM mismatches)
+# ---------------------------------------------------------------------------
+
+def check_player_id_linkage(season: int) -> CheckResult:
+    """
+    Verify that SP IDs from the schedule/lineups actually exist in pitching_stats.
+
+    This catches the class of bug where pitching_stats is keyed by FanGraphs IDfg
+    but the rest of the pipeline uses MLBAM IDs — causing all SP features to be null
+    at prediction time even though stats are present in the DB.
+
+    Method:
+    - Sample up to 20 SP IDs from lineups for the season
+    - Check what fraction have a matching row in pitching_stats
+    - FAIL if <10% match (clear ID system mismatch)
+    - WARN if 10–50% match (partial or small-sample issue)
+    """
+    with get_db() as session:
+        # Get SP IDs stored in lineups for this season
+        sp_rows = session.execute(
+            text("""
+                SELECT DISTINCT l.sp_id
+                FROM lineups l
+                JOIN games g ON g.game_pk = l.game_pk
+                WHERE g.season = :season AND l.sp_id IS NOT NULL
+                LIMIT 50
+            """),
+            {"season": season},
+        ).fetchall()
+
+        if not sp_rows:
+            return CheckResult(
+                "player_id_linkage", WARN,
+                f"No SP IDs in lineups for {season} — cannot check linkage",
+            )
+
+        sp_ids = [r[0] for r in sp_rows]
+        sample = random.sample(sp_ids, min(20, len(sp_ids)))
+
+        matched = session.execute(
+            text("""
+                SELECT COUNT(DISTINCT player_id)
+                FROM pitching_stats
+                WHERE season = :season AND player_id = ANY(:ids)
+            """),
+            {"season": season, "ids": sample},
+        ).scalar() or 0
+
+    pct = matched / len(sample) * 100
+    if pct >= 50:
+        return CheckResult(
+            "player_id_linkage", PASS,
+            f"{matched}/{len(sample)} SP IDs ({pct:.0f}%) found in pitching_stats",
+        )
+    if pct >= 10:
+        return CheckResult(
+            "player_id_linkage", WARN,
+            f"Only {matched}/{len(sample)} SP IDs ({pct:.0f}%) found in pitching_stats "
+            f"— partial ID mismatch or sparse season stats",
+        )
+    return CheckResult(
+        "player_id_linkage", FAIL,
+        f"Only {matched}/{len(sample)} SP IDs ({pct:.0f}%) found in pitching_stats "
+        f"— likely player ID system mismatch (IDfg vs MLBAM). "
+        f"Re-ingest stats with: python -m src.pipeline.ingest --seasons {season} {season} --stats-only",
     )
 
 
@@ -710,6 +782,7 @@ def run_qc(
         report.checks.extend(check_stat_counts(season))
         report.checks.append(check_value_sanity(season))
         report.checks.append(check_game_counts(season))
+        report.checks.append(check_player_id_linkage(season))
 
         # Network checks (run when n_spot_checks > 0)
         if pb and n_spot_checks > 0:
