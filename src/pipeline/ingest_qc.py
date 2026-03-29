@@ -4,28 +4,35 @@ src/pipeline/ingest_qc.py
 Quality-control checks for the historical data ingest.
 
 Compares the local database against a sampling of data points fetched
-directly from Baseball Savant / FanGraphs to verify the ingest was complete
-and accurate.
+directly from Baseball Savant / FanGraphs / MLB Stats API to verify the
+ingest was complete and accurate.
 
 Checks performed
 ----------------
-1. Coverage    -- every expected 14-day chunk in each season has Statcast rows
-2. Boundaries  -- first and last pitch of each chunk have the correct game_date
-3. Stat counts -- batting/pitching/fielding row counts are within plausible ranges
-4. Value sanity-- flags impossible Statcast values (speed, spin, null game_pk)
-5. Spot-check  -- re-fetches N random chunks per season from Baseball Savant;
-                  compares row counts and a random sample of 10 individual
-                  pitches (game_pk, pitcher_id, pitch_type, release_speed)
+1. Coverage       -- every expected 14-day chunk in each season has Statcast rows
+2. Boundaries     -- first and last pitch of each chunk have the correct game_date
+3. Stat counts    -- batting/pitching/fielding row counts are within plausible ranges
+4. Value sanity   -- flags impossible Statcast values (speed, spin, null game_pk)
+5. Game counts    -- games table has the expected number of Final games per season
+6. Spot-check     -- re-fetches N random chunks per season from Baseball Savant;
+                     compares row counts and a random sample of 10 individual
+                     pitches (game_pk, pitcher_id, pitch_type, release_speed)
+7. Game results   -- re-fetches 10 random game scores from the MLB Stats API and
+                     compares home/away score exactly against the DB
+8. Pitcher stats  -- re-fetches 3 random qualified pitchers from FanGraphs and
+                     compares ERA (±0.20) and K% (±0.5 pp) against the DB
+9. Batter stats   -- re-fetches 3 random qualified batters from FanGraphs and
+                     compares AVG (±0.003) and OPS (±0.010) against the DB
 
 Usage (inside Docker)
 ---------------------
-    # Fast checks only (no source re-fetch):
+    # Fast checks only (no source re-fetch, ~30 seconds):
     docker compose exec backend python -m src.pipeline.ingest_qc --seasons 2019 2025 --spot-checks 0
 
-    # Full check — re-fetches 1 random chunk per season from Baseball Savant:
+    # Full check — re-fetches from source for all network checks (~15 min):
     docker compose exec backend python -m src.pipeline.ingest_qc --seasons 2019 2025
 
-    # More thorough — re-fetches 2 chunks per season:
+    # More thorough Statcast spot-check (2 chunks per season):
     docker compose exec backend python -m src.pipeline.ingest_qc --seasons 2019 2025 --spot-checks 2
 """
 
@@ -38,7 +45,20 @@ from datetime import date, timedelta
 from sqlalchemy import func
 
 from src.db.connection import get_db
-from src.db.schema import BattingStats, FieldingStats, PitchingStats, StatcastPitch
+from src.db.schema import BattingStats, FieldingStats, Game, PitchingStats, StatcastPitch
+
+# Expected range of Final regular-season games per season (home + away = 1 game).
+# Tolerance of ±30 covers typical postponements / makeup games.
+# 2020 was a 60-game COVID season; 2025 may be mid-season depending on run date.
+EXPECTED_GAME_RANGE: dict[int, tuple[int, int]] = {
+    2019: (2400, 2460),
+    2020: (870,  930),
+    2021: (2400, 2460),
+    2022: (2400, 2460),
+    2023: (2400, 2460),
+    2024: (2400, 2460),
+    2025: (50,   2460),  # open upper bound — season may still be in progress
+}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -376,6 +396,278 @@ def spot_check_chunk(
 
 
 # ---------------------------------------------------------------------------
+# Check 5: Game counts (offline)
+# ---------------------------------------------------------------------------
+
+def check_game_counts(season: int) -> CheckResult:
+    """
+    Verify the games table has a plausible number of completed games.
+
+    Checks:
+    - Total Final games is within the expected range for the season format.
+    - No Final games are missing a score (home_score or away_score is null).
+    - home_win is set for all Final games (training target is populated).
+    """
+    issues: list[str] = []
+
+    with get_db() as session:
+        total_final = (
+            session.query(func.count(Game.id))
+            .filter(Game.season == season, Game.status == "Final")
+            .scalar()
+        )
+        missing_score = (
+            session.query(func.count(Game.id))
+            .filter(
+                Game.season == season,
+                Game.status == "Final",
+                (Game.home_score.is_(None)) | (Game.away_score.is_(None)),
+            )
+            .scalar()
+        )
+        missing_outcome = (
+            session.query(func.count(Game.id))
+            .filter(
+                Game.season == season,
+                Game.status == "Final",
+                Game.home_win.is_(None),
+            )
+            .scalar()
+        )
+
+    lo, hi = EXPECTED_GAME_RANGE.get(season, (50, 2460))
+    if total_final == 0:
+        return CheckResult("game_counts", FAIL, "0 Final games — games table not ingested")
+    if not (lo <= total_final <= hi):
+        issues.append(f"{total_final:,} Final games (expected {lo:,}–{hi:,})")
+    if missing_score:
+        issues.append(f"{missing_score:,} Final games missing a score")
+    if missing_outcome:
+        issues.append(f"{missing_outcome:,} Final games missing home_win (training target)")
+
+    if not issues:
+        return CheckResult("game_counts", PASS, f"{total_final:,} Final games")
+    status = FAIL if total_final == 0 or missing_score else WARN
+    return CheckResult("game_counts", status, "; ".join(issues))
+
+
+# ---------------------------------------------------------------------------
+# Check 6: Statcast spot-check (re-fetch from Baseball Savant)
+# (moved up from original check 5 — logic unchanged)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Check 7: Game result accuracy (re-fetch scores from MLB Stats API)
+# ---------------------------------------------------------------------------
+
+def spot_check_game_results(season: int, n: int = 10) -> CheckResult:
+    """
+    Re-fetch final scores for N random completed games from the MLB Stats API
+    and compare home_score / away_score exactly against the DB.
+
+    Exact score matches are required — even a 1-run difference means the
+    game result stored in the DB is wrong and would corrupt model training.
+    """
+    import statsapi
+
+    with get_db() as session:
+        rows = (
+            session.query(Game.game_pk, Game.home_score, Game.away_score,
+                          Game.game_date, Game.home_team_abbr, Game.away_team_abbr)
+            .filter(
+                Game.season == season,
+                Game.status == "Final",
+                Game.home_score.isnot(None),
+                Game.away_score.isnot(None),
+            )
+            .all()
+        )
+
+    if not rows:
+        return CheckResult("game_result_spot", WARN, "No Final games in DB to check")
+
+    sample = random.sample(rows, min(n, len(rows)))
+    mismatches: list[str] = []
+    errors: list[str] = []
+
+    for row in sample:
+        game_pk, db_home, db_away, game_date, home_abbr, away_abbr = row
+        try:
+            raw = statsapi.boxscore_data(game_pk)
+            api_home = raw.get("home", {}).get("teamStats", {}).get("batting", {}).get("runs")
+            api_away = raw.get("away", {}).get("teamStats", {}).get("batting", {}).get("runs")
+        except Exception as exc:
+            errors.append(f"game_pk={game_pk}: API error ({exc})")
+            continue
+
+        if api_home is None or api_away is None:
+            errors.append(f"game_pk={game_pk}: API returned no score")
+            continue
+
+        if int(api_home) != int(db_home) or int(api_away) != int(db_away):
+            mismatches.append(
+                f"{away_abbr}@{home_abbr} {game_date} "
+                f"DB={db_away}-{db_home} API={api_away}-{api_home}"
+            )
+
+    checked = len(sample) - len(errors)
+    if mismatches:
+        return CheckResult(
+            "game_result_spot", FAIL,
+            f"{len(mismatches)}/{checked} scores wrong: " + "; ".join(mismatches[:3]),
+        )
+    if errors:
+        detail = f"{checked}/{len(sample)} checked (API errors on {len(errors)})"
+        return CheckResult("game_result_spot", WARN, detail)
+    return CheckResult("game_result_spot", PASS, f"All {checked} sampled scores match")
+
+
+# ---------------------------------------------------------------------------
+# Check 8: Pitcher stat spot-check (re-fetch from FanGraphs)
+# ---------------------------------------------------------------------------
+
+def spot_check_pitcher_stats(season: int, n: int = 3) -> CheckResult:
+    """
+    Re-fetch season stats for N random qualified starters from FanGraphs and
+    compare ERA (±0.20) and K% (±0.5 percentage points) against the DB.
+
+    Uses qualified starters (ip ≥ 100) so small-sample relievers don't produce
+    noisy comparisons.
+    """
+    import pybaseball
+
+    with get_db() as session:
+        rows = (
+            session.query(
+                PitchingStats.player_id, PitchingStats.player_name,
+                PitchingStats.era, PitchingStats.k_pct, PitchingStats.ip,
+            )
+            .filter(
+                PitchingStats.season == season,
+                PitchingStats.ip >= 100,
+                PitchingStats.era.isnot(None),
+                PitchingStats.k_pct.isnot(None),
+            )
+            .all()
+        )
+
+    if not rows:
+        return CheckResult("pitcher_stat_spot", WARN, "No qualified starters in DB to check")
+
+    sample = random.sample(rows, min(n, len(rows)))
+
+    try:
+        fg = pybaseball.pitching_stats(season, qual=0)
+    except Exception as exc:
+        return CheckResult("pitcher_stat_spot", WARN, f"FanGraphs fetch failed: {exc}")
+
+    # FanGraphs uses IDfg as the player identifier
+    fg_by_id = {int(row["IDfg"]): row for _, row in fg.iterrows() if "IDfg" in fg.columns}
+
+    mismatches: list[str] = []
+    matched = 0
+
+    for player_id, name, db_era, db_kpct, db_ip in sample:
+        src = fg_by_id.get(int(player_id))
+        if src is None:
+            mismatches.append(f"{name}: not found in FanGraphs source")
+            continue
+
+        src_era = src.get("ERA")
+        src_kpct = src.get("K%")
+
+        era_ok = src_era is None or db_era is None or abs(float(src_era) - float(db_era)) <= 0.20
+        kpct_ok = src_kpct is None or db_kpct is None or abs(float(src_kpct) - float(db_kpct)) <= 0.005
+
+        if not era_ok:
+            mismatches.append(f"{name}: ERA DB={db_era:.2f} source={src_era:.2f}")
+        elif not kpct_ok:
+            mismatches.append(f"{name}: K% DB={db_kpct:.3f} source={src_kpct:.3f}")
+        else:
+            matched += 1
+
+    if not mismatches:
+        return CheckResult("pitcher_stat_spot", PASS, f"All {matched} sampled pitchers match")
+    status = FAIL if len(mismatches) >= n else WARN
+    return CheckResult(
+        "pitcher_stat_spot", status,
+        f"{matched}/{len(sample)} match; issues: " + "; ".join(mismatches[:2]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Check 9: Batter stat spot-check (re-fetch from FanGraphs)
+# ---------------------------------------------------------------------------
+
+def spot_check_batter_stats(season: int, n: int = 3) -> CheckResult:
+    """
+    Re-fetch season stats for N random qualified batters from FanGraphs and
+    compare AVG (±0.003) and OPS (±0.010) against the DB.
+
+    Uses qualified batters (pa ≥ 300) for stable comparisons.
+    """
+    import pybaseball
+
+    with get_db() as session:
+        rows = (
+            session.query(
+                BattingStats.player_id, BattingStats.player_name,
+                BattingStats.avg, BattingStats.ops, BattingStats.pa,
+            )
+            .filter(
+                BattingStats.season == season,
+                BattingStats.pa >= 300,
+                BattingStats.avg.isnot(None),
+                BattingStats.ops.isnot(None),
+            )
+            .all()
+        )
+
+    if not rows:
+        return CheckResult("batter_stat_spot", WARN, "No qualified batters in DB to check")
+
+    sample = random.sample(rows, min(n, len(rows)))
+
+    try:
+        fg = pybaseball.batting_stats(season, qual=0)
+    except Exception as exc:
+        return CheckResult("batter_stat_spot", WARN, f"FanGraphs fetch failed: {exc}")
+
+    fg_by_id = {int(row["IDfg"]): row for _, row in fg.iterrows() if "IDfg" in fg.columns}
+
+    mismatches: list[str] = []
+    matched = 0
+
+    for player_id, name, db_avg, db_ops, db_pa in sample:
+        src = fg_by_id.get(int(player_id))
+        if src is None:
+            mismatches.append(f"{name}: not found in FanGraphs source")
+            continue
+
+        src_avg = src.get("AVG")
+        src_ops = src.get("OPS")
+
+        avg_ok = src_avg is None or db_avg is None or abs(float(src_avg) - float(db_avg)) <= 0.003
+        ops_ok = src_ops is None or db_ops is None or abs(float(src_ops) - float(db_ops)) <= 0.010
+
+        if not avg_ok:
+            mismatches.append(f"{name}: AVG DB={db_avg:.3f} source={src_avg:.3f}")
+        elif not ops_ok:
+            mismatches.append(f"{name}: OPS DB={db_ops:.3f} source={src_ops:.3f}")
+        else:
+            matched += 1
+
+    if not mismatches:
+        return CheckResult("batter_stat_spot", PASS, f"All {matched} sampled batters match")
+    status = FAIL if len(mismatches) >= n else WARN
+    return CheckResult(
+        "batter_stat_spot", status,
+        f"{matched}/{len(sample)} match; issues: " + "; ".join(mismatches[:2]),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main runner
 # ---------------------------------------------------------------------------
 
@@ -412,18 +704,28 @@ def run_qc(
         logger.info("── QC season %d ──", season)
         report = SeasonReport(season)
 
+        # Offline checks (always run)
         report.checks.append(check_coverage(season))
         report.checks.append(check_boundaries(season))
         report.checks.extend(check_stat_counts(season))
         report.checks.append(check_value_sanity(season))
+        report.checks.append(check_game_counts(season))
 
+        # Network checks (run when n_spot_checks > 0)
         if pb and n_spot_checks > 0:
+            # Statcast chunk re-fetch
             chunks = _season_chunks(season)
-            # Prefer mid-season chunks; skip first and last (may be partial weeks)
             eligible = chunks[1:-1] if len(chunks) > 2 else chunks
             selected = random.sample(eligible, min(n_spot_checks, len(eligible)))
             for chunk_start, chunk_end in selected:
                 report.checks.append(spot_check_chunk(season, chunk_start, chunk_end, pb))
+
+            # Game score accuracy
+            report.checks.append(spot_check_game_results(season))
+
+            # Player stat accuracy
+            report.checks.append(spot_check_pitcher_stats(season))
+            report.checks.append(spot_check_batter_stats(season))
 
         reports[season] = report
 
