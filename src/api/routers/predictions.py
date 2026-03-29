@@ -24,7 +24,7 @@ from src.api.schemas import (
     TodayScheduleResponse,
 )
 from src.db.connection import get_db
-from src.db.queries import get_last_refresh, get_prediction, get_today_predictions
+from src.db.queries import get_game, get_last_refresh, get_prediction, get_today_predictions
 from src.pipeline.adapters.mlb_stats import MLBStatsAdapter
 from src.pipeline.daily_refresh import _load_active_models
 from src.pipeline.features import build_prediction_features
@@ -39,9 +39,9 @@ _mlb = MLBStatsAdapter()
 
 @router.get("/predict/game", response_model=GamePrediction)
 async def predict_game(
-    home_team_id: int = Query(..., description="Home team ID"),
-    away_team_id: int = Query(..., description="Away team ID"),
-    game_pk: Optional[int] = Query(None, description="MLB game_pk (preferred over team IDs)"),
+    game_pk: Optional[int] = Query(None, description="MLB game_pk"),
+    home_team_id: Optional[int] = Query(None, description="Home team ID"),
+    away_team_id: Optional[int] = Query(None, description="Away team ID"),
     date_str: Optional[str] = Query(None, alias="date", description="Game date YYYY-MM-DD"),
 ):
     """
@@ -56,8 +56,15 @@ async def predict_game(
     if game_pk:
         with get_db() as session:
             stored = get_prediction(session, game_pk)
-        if stored:
-            return _prediction_row_to_schema(stored, home_team_id, away_team_id)
+            if stored:
+                # Resolve team IDs from the games table if not passed as params
+                if not home_team_id or not away_team_id:
+                    game_row = get_game(session, game_pk)
+                    h_id = home_team_id or (game_row.home_team_id if game_row else 0)
+                    a_id = away_team_id or (game_row.away_team_id if game_row else 0)
+                else:
+                    h_id, a_id = home_team_id, away_team_id
+                return _prediction_row_to_schema(stored, h_id, a_id)
 
     # Fall back to on-demand prediction
     try:

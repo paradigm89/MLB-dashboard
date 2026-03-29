@@ -192,6 +192,10 @@ def get_recent_games_for_team(session: Session, team_id: int, before_date: str, 
     return _to_df(rows)
 
 
+def get_game(session: Session, game_pk: int) -> Optional[Game]:
+    return session.query(Game).filter(Game.game_pk == game_pk).first()
+
+
 def get_prediction(session: Session, game_pk: int) -> Optional[Prediction]:
     return (
         session.query(Prediction)
