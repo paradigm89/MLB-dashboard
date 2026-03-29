@@ -1,0 +1,30 @@
+# =============================================================================
+# Scheduler job timing (APScheduler cron expressions, ET timezone).
+# To change refresh times: edit this file only.
+# =============================================================================
+
+timezone: America/New_York
+
+jobs:
+  morning_refresh:
+    # Fetch today's schedule, probable pitchers, run predictions with projected lineups.
+    # Also appends previous day's completed game results and updates Elo.
+    cron: "0 9 * * *"    # 9:00 AM ET daily (during season Apr-Oct)
+    function: src.pipeline.daily_refresh.run_morning_refresh
+
+  afternoon_refresh:
+    # Check for confirmed lineups (~3 hrs before first pitch).
+    # Re-runs predictions for games with newly confirmed lineups.
+    cron: "0 15 * * *"   # 3:00 PM ET daily
+    function: src.pipeline.daily_refresh.run_afternoon_refresh
+
+  evening_refresh:
+    # Catch late lineup confirmations for night games (7-10 PM start times).
+    # Also handles West Coast games where lineups post after 3 PM ET.
+    cron: "0 17 * * *"   # 5:00 PM ET daily
+    function: src.pipeline.daily_refresh.run_afternoon_refresh  # same logic, second pass
+
+  weekly_retrain:
+    # Retrain all models incorporating the prior week's game results.
+    cron: "0 6 * * 1"    # Every Monday at 6:00 AM ET
+    function: src.pipeline.retrain_scheduler.run_weekly_retrain

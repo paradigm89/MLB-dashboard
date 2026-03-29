@@ -1,0 +1,98 @@
+# =============================================================================
+# Feature definitions for each ML model.
+# To add or remove a feature: edit this file only — no code changes needed.
+# Each feature maps to a column in the engineered feature matrix.
+# =============================================================================
+
+# Shared context features used by ALL models
+shared:
+  - is_home                      # 1=home team, 0=away
+  - days_rest_pitcher            # days since pitcher's last start
+  - days_rest_team               # days since team's last game
+  - park_factor_runs             # park run factor (100=neutral)
+  - park_factor_hr               # park HR factor
+  - park_factor_hits             # park hits factor
+  - elo_home                     # home team Elo rating
+  - elo_away                     # away team Elo rating
+  - season_game_number           # games played so far this season (fatigue)
+  - is_doubleheader              # boolean
+  - temperature                  # game-time temperature (F); null for pre-game predictions
+  - wind_speed                   # mph; null for pre-game
+  - wind_direction_in            # 1=blowing in, 0=otherwise
+  - wind_direction_out           # 1=blowing out, 0=otherwise
+  - roof_closed                  # 1=dome/retractable closed
+  - umpire_called_strike_delta   # umpire's called strike rate vs. league avg; 0.0 when unknown
+
+# Team rolling stats (computed per team per game from recent game log)
+# All features below are computed for both home and away sides.
+# Suffixed _home / _away in the actual feature matrix.
+team_rolling:
+  - runs_scored_7g               # avg runs scored per game, last 7 games
+  - runs_scored_30g              # avg runs scored per game, last 30 games
+  - runs_allowed_7g              # avg runs allowed per game, last 7 games
+  - runs_allowed_30g             # avg runs allowed per game, last 30 games
+  - ops_30g                      # team OPS, last 30 games
+  - era_30g                      # team ERA, last 30 games
+  - whip_30g                     # team WHIP, last 30 games
+  - fip_30g                      # team FIP, last 30 games
+  - wrc_plus_30g                 # team wRC+, last 30 games
+  - pythagorean_win_pct          # RS^1.83 / (RS^1.83 + RA^1.83) over last 30g
+  - run_diff_slope_10g           # linear slope of run differential last 10 games (momentum)
+  - bullpen_era_7d               # bullpen ERA, last 7 days
+  - bullpen_ip_3d                # bullpen IP used in last 3 days (availability)
+  - team_drs_30g                 # team Defensive Runs Saved, last 30 games
+  - lineup_xwoba_score           # weighted xwOBA of projected/confirmed lineup
+
+# Starting pitcher features (for the game's projected starter)
+# Suffixed _home_sp / _away_sp in the actual feature matrix.
+pitcher:
+  - sp_xfip_season               # season xFIP
+  - sp_fip_season                # season FIP (cross-check)
+  - sp_siera_season              # SIERA (peripherals-based ERA estimator)
+  - sp_k_pct_season              # strikeout %
+  - sp_bb_pct_season             # walk %
+  - sp_k_minus_bb_season         # K-BB% (efficiency proxy)
+  - sp_hr_per_9_season           # HR/9
+  - sp_xfip_rolling5             # xFIP over last 5 starts
+  - sp_k_pct_rolling5            # K% over last 5 starts
+  - sp_ip_rolling5               # avg IP per start over last 5
+  - sp_fastball_velo_rolling3    # avg fastball velocity last 3 starts
+  - sp_velo_delta_rolling3       # velocity trend vs season avg (negative = fatigue signal)
+  - sp_swstr_pct_season          # swinging strike %
+  - sp_pct_ff                    # 4-seam fastball usage %
+  - sp_pct_sl                    # slider usage %
+  - sp_pct_ch                    # changeup usage %
+  - sp_pct_cu                    # curveball usage %
+  - sp_throws_l                  # 1=LHP, 0=RHP
+  # Opponent-specific (Bayesian-blended when n_gs < 8)
+  - sp_vs_opp_xfip               # xFIP vs. this specific opponent
+  - sp_vs_opp_k_pct              # K% vs. this specific opponent
+  - sp_vs_opp_hr_per_9           # HR/9 vs. this specific opponent
+  - sp_vs_opp_sample_gs          # number of games used for opponent-specific features
+  # Opponent team vulnerability
+  - opp_k_pct_vs_hand            # opponent team K% vs this pitcher's handedness
+  - opp_ops_vs_hand              # opponent team OPS vs this pitcher's handedness
+
+# Batter vs. pitcher matchup features
+# One row per (batter_id, pitcher_id) in batter_matchup model
+# These are Bayesian-blended from Statcast data in matchups.py
+batter_matchup:
+  - batter_xwoba_season          # batter overall season xwOBA
+  - batter_xwoba_vs_ff           # batter xwOBA vs. 4-seam fastball
+  - batter_xwoba_vs_sl           # batter xwOBA vs. slider
+  - batter_xwoba_vs_ch           # batter xwOBA vs. changeup
+  - batter_xwoba_vs_cu           # batter xwOBA vs. curveball
+  - batter_wrc_plus_vs_hand      # batter wRC+ vs. pitcher's handedness
+  - batter_chase_rate            # batter O-Swing% (chase rate)
+  - batter_z_contact             # batter in-zone contact %
+  - batter_barrel_pct            # barrel %
+  - batter_hard_hit_pct          # hard hit %
+  - pitcher_whiff_ff             # pitcher whiff rate on 4-seam vs. batter's handedness
+  - pitcher_whiff_sl             # pitcher whiff rate on slider
+  - pitcher_whiff_ch             # pitcher whiff rate on changeup
+  - pitcher_zone_pct             # pitcher zone% (attack rate)
+  - pitcher_edge_pct             # pitcher edge%
+  - batter_hand_l                # 1=LHB, 0=RHB
+  - pitcher_hand_l               # 1=LHP, 0=RHP
+  - n_pa_matchup                 # historical PA between this pair (for Bayesian blend weight)
+  - batting_order_position       # 1-9 (used for lineup aggregation weighting)

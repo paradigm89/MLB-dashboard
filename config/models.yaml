@@ -1,0 +1,87 @@
+# =============================================================================
+# Model configuration.
+# To swap a model implementation: change the `class` field.
+# Any class implementing BaseMLBModel (src/models/base.py) is valid.
+# =============================================================================
+
+run_expectancy:
+  class: src.models.run_expectancy.XGBoostRunModel
+  artifact_prefix: run_exp
+  target: runs_scored          # column in the game feature matrix
+  # XGBoost hyperparameters (tuned with Optuna on 2019-2024)
+  params:
+    n_estimators: 500
+    learning_rate: 0.05
+    max_depth: 6
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_weight: 5
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    objective: count:poisson   # Poisson log-likelihood loss → outputs Poisson rate λ
+    eval_metric: poisson-nloglik
+    early_stopping_rounds: 50
+  feature_groups:
+    - shared
+    - team_rolling
+    - pitcher
+
+pitcher_model:
+  class: src.models.pitcher_model.XGBoostPitcherModel
+  artifact_prefix: pitcher
+  target: xfip_actual          # actual xFIP for the start (computed from Statcast post-game)
+  params:
+    n_estimators: 400
+    learning_rate: 0.05
+    max_depth: 5
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_weight: 3
+    reg_alpha: 0.2
+    reg_lambda: 1.0
+    objective: reg:squarederror
+    eval_metric: rmse
+    early_stopping_rounds: 50
+  feature_groups:
+    - shared
+    - pitcher
+
+batter_matchup:
+  class: src.models.batter_matchup.LGBMBatterMatchup
+  artifact_prefix: batter_matchup
+  target: xwoba_actual         # actual xwOBA for the PA (from Statcast estimated_woba_using_speedangle)
+  params:
+    n_estimators: 600
+    learning_rate: 0.03
+    max_depth: 7
+    num_leaves: 63
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_samples: 20
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    objective: regression
+    metric: rmse
+    early_stopping_rounds: 50
+    verbose: -1
+  feature_groups:
+    - batter_matchup
+
+# Bayesian shrinkage constants (k values for n / (n + k) blend)
+# Higher k = more shrinkage toward population mean when sample is small
+bayesian_shrinkage:
+  k_rate_stats: 200      # for K%, BB%, O-Swing%, Z-Contact%
+  k_continuous: 100      # for xwOBA, wOBA rates
+  k_era_stats: 8         # for ERA/xFIP vs. specific opponent (in games started)
+  min_pa_matchup: 5      # below this, use full population prior
+  min_gs_pitcher_opp: 3  # below this, use full population prior for pitcher vs opp
+
+# Monte Carlo simulator settings
+simulator:
+  n_simulations: 10000
+  max_innings: 9          # standard game; extra innings handled separately
+  extra_innings_method: coin_flip   # options: coin_flip | markov
+  pitcher_fatigue:
+    pitch_count_threshold: 75
+    inning_threshold: 5
+    effectiveness_decay: 0.08      # multiply pitcher advantage by (1 - decay) per threshold exceeded
