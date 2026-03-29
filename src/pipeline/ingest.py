@@ -295,8 +295,14 @@ def _upsert_dataframe(df: pd.DataFrame, model_class, conflict_cols: list[str]) -
             if not records:
                 continue
 
+            # Normalize: all records in a batch must have the same keys.
+            # pg_insert().values(list) uses the first record's keys for all rows;
+            # rows missing a key cause a CompileError. Fill gaps with None (SQL NULL).
+            all_keys = set().union(*records)
+            records = [{k: rec.get(k, None) for k in all_keys} for rec in records]
+
             # Build update set (all non-conflict columns)
-            update_cols = [c for c in records[0].keys() if c not in conflict_cols and c != "id"]
+            update_cols = [c for c in all_keys if c not in conflict_cols and c != "id"]
             stmt = (
                 pg_insert(table)
                 .values(records)
