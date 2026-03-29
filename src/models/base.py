@@ -84,15 +84,20 @@ class BaseMLBModel(ABC):
     def _align_features(self, X: pd.DataFrame) -> pd.DataFrame:
         """
         Align a prediction DataFrame to the training feature set.
-        Adds missing columns as NaN, drops extra columns, reorders.
-        This ensures the model sees the same feature order as at training time.
+        Adds missing columns as NaN, drops extra columns, reorders, and
+        coerces all columns to float so XGBoost/LightGBM never see object dtype.
+        None values become np.nan which both frameworks handle natively.
         """
-        missing = set(self._feature_names) - set(X.columns)
-        if missing:
-            for col in missing:
-                X = X.copy()
+        X = X.copy()
+        for col in self._feature_names:
+            if col not in X.columns:
                 X[col] = np.nan
-        return X[self._feature_names]
+        X = X[self._feature_names]
+        # Coerce object dtype columns (contain Python None) to float
+        for col in X.columns:
+            if X[col].dtype == object:
+                X[col] = pd.to_numeric(X[col], errors="coerce")
+        return X
 
     def _drop_non_features(self, df: pd.DataFrame,
                             non_feature_cols: list[str]) -> pd.DataFrame:

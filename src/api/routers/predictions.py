@@ -24,7 +24,7 @@ from src.api.schemas import (
     TodayScheduleResponse,
 )
 from src.db.connection import get_db
-from src.db.queries import get_prediction, get_today_predictions
+from src.db.queries import get_last_refresh, get_prediction, get_today_predictions
 from src.pipeline.adapters.mlb_stats import MLBStatsAdapter
 from src.pipeline.daily_refresh import _load_active_models
 from src.pipeline.features import build_prediction_features
