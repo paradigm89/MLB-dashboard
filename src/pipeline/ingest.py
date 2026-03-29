@@ -215,14 +215,17 @@ def _ingest_statcast_range(pb: PybaseballAdapter, start_date: str, end_date: str
         records.append(rec)
 
     inserted = 0
+    # Use executemany style (session.execute(stmt, list)) rather than
+    # pg_insert(table).values(list) to avoid SQLAlchemy CompileError caused
+    # by Python-side column defaults (created_at) in multi-row VALUES mode.
+    conflict_stmt = pg_insert(table).on_conflict_do_nothing()
     with get_db() as session:
         for i in range(0, len(records), 500):
             batch = records[i : i + 500]
-            # Normalize keys across the batch so every row has identical columns
+            # Normalize keys so every row has identical columns (required for executemany)
             all_keys = set().union(*batch)
             batch = [{k: rec.get(k, None) for k in all_keys} for rec in batch]
-            stmt = pg_insert(table).values(batch).on_conflict_do_nothing()
-            session.execute(stmt)
+            session.execute(conflict_stmt, batch)
             inserted += len(batch)
 
     logger.info("Inserted %d Statcast pitches (%s to %s)", inserted, start_date, end_date)
@@ -323,17 +326,16 @@ def _upsert_dataframe(df: pd.DataFrame, model_class, conflict_cols: list[str]) -
             all_keys = set().union(*records)
             records = [{k: rec.get(k, None) for k in all_keys} for rec in records]
 
-            # Build update set (all non-conflict columns)
+            # Build update set (all non-conflict columns).
+            # Use executemany style (session.execute(stmt, list)) to avoid
+            # CompileError from Python-side column defaults in multi-row VALUES mode.
             update_cols = [c for c in all_keys if c not in conflict_cols and c != "id"]
-            stmt = (
-                pg_insert(table)
-                .values(records)
-                .on_conflict_do_update(
-                    index_elements=conflict_cols,
-                    set_={col: pg_insert(table).excluded[col] for col in update_cols},
-                )
+            base_stmt = pg_insert(table)
+            stmt = base_stmt.on_conflict_do_update(
+                index_elements=conflict_cols,
+                set_={col: base_stmt.excluded[col] for col in update_cols},
             )
-            session.execute(stmt)
+            session.execute(stmt, records)
 
 
 # ---------------------------------------------------------------------------
