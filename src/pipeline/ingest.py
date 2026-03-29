@@ -203,13 +203,25 @@ def _ingest_statcast_range(pb: PybaseballAdapter, start_date: str, end_date: str
     if df.empty:
         return
 
-    # Bulk insert; Statcast rows are immutable so we skip conflicts
-    with get_db() as session:
-        records = df.to_dict(orient="records")
-        stmt = pg_insert(StatcastPitch.__table__).values(records).on_conflict_do_nothing()
-        session.execute(stmt)
+    # Bulk insert in batches of 500 to stay within PostgreSQL's 65,535 parameter limit.
+    # Statcast rows are immutable so we skip conflicts rather than update.
+    table = StatcastPitch.__table__
+    table_cols = {c.name for c in table.columns}
+    records = [{k: (None if pd.isna(v) else v) for k, v in row.items() if k in table_cols}
+               for row in df.to_dict(orient="records")]
 
-    logger.info("Inserted %d Statcast pitches (%s to %s)", len(df), start_date, end_date)
+    inserted = 0
+    with get_db() as session:
+        for i in range(0, len(records), 500):
+            batch = records[i : i + 500]
+            # Normalize keys across the batch
+            all_keys = set().union(*batch)
+            batch = [{k: rec.get(k, None) for k in all_keys} for rec in batch]
+            stmt = pg_insert(table).values(batch).on_conflict_do_nothing()
+            session.execute(stmt)
+            inserted += len(batch)
+
+    logger.info("Inserted %d Statcast pitches (%s to %s)", inserted, start_date, end_date)
 
 
 def _get_last_statcast_date(session, season: int) -> Optional[str]:
