@@ -216,9 +216,13 @@ class PybaseballAdapter(DataAdapter):
         }
         df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
 
-        # Derive season from game_date
+        # Derive season from game_date; normalize to plain YYYY-MM-DD string so it
+        # fits the VARCHAR(10) column (pybaseball returns a pandas Timestamp which
+        # psycopg2 would serialize as '2019-04-10 00:00:00' — 19 chars, too long).
         if "game_date" in df.columns:
-            df["season"] = pd.to_datetime(df["game_date"]).dt.year
+            dt = pd.to_datetime(df["game_date"])
+            df["season"] = dt.dt.year
+            df["game_date"] = dt.dt.strftime("%Y-%m-%d")
 
         # Ensure batter_name column exists (not always present in pybaseball output)
         if "batter_name" not in df.columns:
@@ -251,11 +255,25 @@ class PybaseballAdapter(DataAdapter):
 
     def get_park_factors(self, season: int) -> pd.DataFrame:
         logger.info("Fetching park factors for %d", season)
-        try:
-            # pybaseball uses team_park_factors, not park_factors
-            df = pybaseball.team_park_factors(pos="np", season=season, league="ALL")
-        except Exception as exc:
-            logger.error("Park factors fetch failed for %d: %s", season, exc)
+        df = None
+        # Function name changed across pybaseball versions — try both
+        for fn_name in ("park_factors", "team_park_factors"):
+            fn = getattr(pybaseball, fn_name, None)
+            if fn is None:
+                continue
+            try:
+                df = fn(pos="np", season=season, league="ALL")
+                break
+            except TypeError:
+                try:
+                    df = fn(season)
+                    break
+                except Exception as exc:
+                    logger.warning("pybaseball.%s(%d) failed: %s", fn_name, season, exc)
+            except Exception as exc:
+                logger.warning("pybaseball.%s failed for %d: %s", fn_name, season, exc)
+        if df is None or (hasattr(df, "empty") and df.empty):
+            logger.error("Park factors fetch failed for %d: no working function found", season)
             return pd.DataFrame()
 
         col_map = {
