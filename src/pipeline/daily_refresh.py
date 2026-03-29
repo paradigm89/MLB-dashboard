@@ -101,6 +101,11 @@ def run_morning_refresh() -> None:
                             error_message="; ".join(errors[:3]))
         return
 
+    # Daily QC — runs after predictions are generated so all checks have data
+    qc_warnings = _run_daily_qc(today, yesterday, games)
+    if qc_warnings:
+        errors.extend(qc_warnings)
+
     status = "completed" if not errors else "partial"
     _finish_refresh_log(log_id, status, games_updated=games_updated,
                         error_message="; ".join(errors[:3]) if errors else None)
@@ -361,6 +366,114 @@ def _finish_refresh_log(log_id: int, status: str, games_updated: int = 0,
             {"status": status, "ca": dt.utcnow(), "gu": games_updated,
              "lc": lineups_confirmed, "em": error_message, "id": log_id},
         )
+
+
+def _run_daily_qc(today: str, yesterday: str, scheduled_games: list) -> list[str]:
+    """
+    Lightweight QC checks that run automatically after every morning refresh.
+
+    Checks
+    ------
+    1. Yesterday's ingest  — all completed games have scores stored
+    2. SP resolution       — fraction of today's games with a known starter ID
+    3. Prediction coverage — a prediction exists for every scheduled game
+    4. Prediction sanity   — no win probability is outside the 15–85% range
+                            (extreme values suggest a feature pipeline failure)
+    5. Lineup status       — log confirmed vs projected lineup counts
+
+    Returns a list of warning strings (empty = all clear).
+    Warnings are appended to the refresh_log error_message field so they
+    surface in the /system/status API endpoint and frontend status bar.
+    """
+    warnings: list[str] = []
+
+    # 1. Yesterday's ingest completeness
+    with get_db() as session:
+        from sqlalchemy import text
+        missing_scores = session.execute(
+            text("""
+                SELECT COUNT(*) FROM games
+                WHERE game_date = :d AND status = 'Final'
+                  AND (home_score IS NULL OR away_score IS NULL)
+            """),
+            {"d": yesterday},
+        ).scalar()
+    if missing_scores:
+        warnings.append(
+            f"QC: {missing_scores} Final game(s) from {yesterday} are missing scores"
+        )
+
+    # 2. SP resolution rate for today
+    if scheduled_games:
+        no_home_sp = sum(1 for g in scheduled_games if not g.get("home_sp_id"))
+        no_away_sp = sum(1 for g in scheduled_games if not g.get("away_sp_id"))
+        total = len(scheduled_games)
+        if no_home_sp > total // 2:
+            warnings.append(
+                f"QC: {no_home_sp}/{total} home SP IDs unresolved for {today}"
+            )
+        if no_away_sp > total // 2:
+            warnings.append(
+                f"QC: {no_away_sp}/{total} away SP IDs unresolved for {today}"
+            )
+
+    # 3. Prediction coverage
+    if scheduled_games:
+        scheduled_pks = {g["game_pk"] for g in scheduled_games}
+        with get_db() as session:
+            from sqlalchemy import text as _t
+            rows = session.execute(
+                _t("SELECT DISTINCT game_pk FROM predictions WHERE game_date = :d"),
+                {"d": today},
+            ).fetchall()
+        predicted_pks = {r[0] for r in rows}
+        missing_preds = scheduled_pks - predicted_pks
+        if missing_preds:
+            warnings.append(
+                f"QC: {len(missing_preds)} game(s) scheduled for {today} "
+                f"have no prediction: {sorted(missing_preds)[:3]}"
+            )
+
+    # 4. Prediction sanity — win probabilities outside 15–85% are suspicious
+    with get_db() as session:
+        from sqlalchemy import text as _t
+        extreme = session.execute(
+            _t("""
+                SELECT COUNT(*) FROM predictions
+                WHERE game_date = :d
+                  AND (win_prob_home < 0.15 OR win_prob_home > 0.85)
+            """),
+            {"d": today},
+        ).scalar()
+    if extreme:
+        warnings.append(
+            f"QC: {extreme} prediction(s) for {today} have extreme win probability "
+            f"(<15% or >85%) — possible feature pipeline issue"
+        )
+
+    # 5. Lineup status (informational — always log, never a warning)
+    with get_db() as session:
+        from sqlalchemy import text as _t
+        confirmed = session.execute(
+            _t("SELECT COUNT(*) FROM lineups WHERE game_date = :d AND is_confirmed = TRUE"),
+            {"d": today},
+        ).scalar()
+        projected = session.execute(
+            _t("SELECT COUNT(*) FROM lineups WHERE game_date = :d AND is_confirmed = FALSE"),
+            {"d": today},
+        ).scalar()
+    logger.info(
+        "Daily QC lineup status for %s: %d confirmed, %d projected",
+        today, confirmed or 0, projected or 0,
+    )
+
+    if warnings:
+        for w in warnings:
+            logger.warning(w)
+    else:
+        logger.info("Daily QC passed for %s — all checks clean", today)
+
+    return warnings
 
 
 def _load_active_models():
