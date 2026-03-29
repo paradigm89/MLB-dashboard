@@ -482,25 +482,30 @@ def _load_active_models():
     pitcher_model = None
     batter_model = None
 
+    # Extract artifact paths inside the session so objects don't become detached
     with get_db() as session:
-        run_mv = get_active_model_version(session, "run_expectancy")
-        pitcher_mv = get_active_model_version(session, "pitcher_model")
-        batter_mv = get_active_model_version(session, "batter_matchup")
+        def _path(model_type):
+            mv = get_active_model_version(session, model_type)
+            return str(mv.artifact_path) if mv else None
 
-    def _load(mv, class_path: str):
-        if mv is None:
+        run_path = _path("run_expectancy")
+        pitcher_path = _path("pitcher_model")
+        batter_path = _path("batter_matchup")
+
+    def _load(artifact_path: Optional[str], class_path: str):
+        if artifact_path is None:
             return None
         try:
             module_path, class_name = class_path.rsplit(".", 1)
             import importlib
             cls = getattr(importlib.import_module(module_path), class_name)
-            return cls().load(Path(mv.artifact_path))
+            return cls().load(Path(artifact_path))
         except Exception as exc:
             logger.error("Failed to load model %s: %s", class_path, exc)
             return None
 
-    run_model = _load(run_mv, "src.models.run_expectancy.XGBoostRunModel")
-    pitcher_model = _load(pitcher_mv, "src.models.pitcher_model.XGBoostPitcherModel")
-    batter_model = _load(batter_mv, "src.models.batter_matchup.LGBMBatterMatchup")
+    run_model = _load(run_path, "src.models.run_expectancy.XGBoostRunModel")
+    pitcher_model = _load(pitcher_path, "src.models.pitcher_model.XGBoostPitcherModel")
+    batter_model = _load(batter_path, "src.models.batter_matchup.LGBMBatterMatchup")
 
     return run_model, pitcher_model, batter_model

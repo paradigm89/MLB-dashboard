@@ -100,26 +100,34 @@ def check_and_update_confirmed_lineups(game_pk: int, home_team_id: int,
     home_updated = False
     away_updated = False
 
+    # Extract all needed attributes inside the session to avoid DetachedInstanceError
     with get_db() as session:
         existing_home = get_lineup(session, game_pk, home_team_id)
         existing_away = get_lineup(session, game_pk, away_team_id)
 
+        prev_home_sp = existing_home.sp_id if existing_home else None
+        prev_away_sp = existing_away.sp_id if existing_away else None
+        prev_home_confirmed = bool(existing_home.is_confirmed) if existing_home else False
+        prev_away_confirmed = bool(existing_away.is_confirmed) if existing_away else False
+        prev_home_order = existing_home.batting_order if existing_home else ""
+        prev_away_order = existing_away.batting_order if existing_away else ""
+
     # Resolve SP IDs: boxscore confirmed > previously stored probable
-    if home_sp_id is None and existing_home and existing_home.sp_id:
-        home_sp_id = existing_home.sp_id
-    if away_sp_id is None and existing_away and existing_away.sp_id:
-        away_sp_id = existing_away.sp_id
+    if home_sp_id is None and prev_home_sp:
+        home_sp_id = prev_home_sp
+    if away_sp_id is None and prev_away_sp:
+        away_sp_id = prev_away_sp
 
     # Only update if we got a confirmed lineup and it wasn't already confirmed
     if home_confirmed and len(home_order) == 9:
-        if existing_home is None or not existing_home.is_confirmed:
+        if not prev_home_confirmed:
             _upsert_lineup(game_pk, game_date, home_team_id, is_home=True,
                            batting_order=home_order, sp_id=home_sp_id,
                            is_confirmed=True)
             home_updated = True
 
     if away_confirmed and len(away_order) == 9:
-        if existing_away is None or not existing_away.is_confirmed:
+        if not prev_away_confirmed:
             _upsert_lineup(game_pk, game_date, away_team_id, is_home=False,
                            batting_order=away_order, sp_id=away_sp_id,
                            is_confirmed=True)
@@ -128,8 +136,8 @@ def check_and_update_confirmed_lineups(game_pk: int, home_team_id: int,
     return {
         "home_updated": home_updated,
         "away_updated": away_updated,
-        "home_lineup": home_order if home_confirmed else (existing_home.batting_order.split(",") if existing_home else []),
-        "away_lineup": away_order if away_confirmed else (existing_away.batting_order.split(",") if existing_away else []),
+        "home_lineup": home_order if home_confirmed else (prev_home_order.split(",") if prev_home_order else []),
+        "away_lineup": away_order if away_confirmed else (prev_away_order.split(",") if prev_away_order else []),
         "home_confirmed": home_confirmed,
         "away_confirmed": away_confirmed,
         "home_sp_id": home_sp_id,

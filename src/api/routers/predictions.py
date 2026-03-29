@@ -174,31 +174,39 @@ async def get_today_schedule():
     today = str(date.today())
     games_raw = _mlb.get_schedule(today)
 
-    with get_db() as session:
-        predictions = {p.game_pk: p for p in get_today_predictions(session, today)}
-        from src.db.queries import get_last_refresh
-        last_refresh = get_last_refresh(session, "morning")
-
     lineup_confirmed_count = 0
     games_out = []
-    for g in games_raw:
-        pred = predictions.get(g["game_pk"])
-        game_item = GameScheduleItem(
-            game_pk=g["game_pk"],
-            game_date=today,
-            venue_name=g.get("venue_name"),
-            home_team=TeamInfo(team_id=g["home_team_id"], team_abbr=g.get("home_team_abbr", "")),
-            away_team=TeamInfo(team_id=g["away_team_id"], team_abbr=g.get("away_team_abbr", "")),
-            home_sp=PitcherInfo(pitcher_id=g["home_sp_id"], pitcher_name=g.get("home_sp_name")) if g.get("home_sp_id") else None,
-            away_sp=PitcherInfo(pitcher_id=g["away_sp_id"], pitcher_name=g.get("away_sp_name")) if g.get("away_sp_id") else None,
-            home_lineup_confirmed=pred.home_lineup_confirmed if pred else False,
-            away_lineup_confirmed=pred.away_lineup_confirmed if pred else False,
-            predictions=_prediction_row_to_schema(pred, g["home_team_id"], g["away_team_id"]) if pred else None,
-            data_as_of=pred.generated_at if pred else None,
-        )
-        if game_item.home_lineup_confirmed and game_item.away_lineup_confirmed:
-            lineup_confirmed_count += 1
-        games_out.append(game_item)
+
+    with get_db() as session:
+        predictions = {p.game_pk: p for p in get_today_predictions(session, today)}
+        last_refresh = get_last_refresh(session, "morning")
+
+        # Build all output objects inside the session so ORM attributes are accessible
+        for g in games_raw:
+            pred = predictions.get(g["game_pk"])
+            home_confirmed = bool(pred.home_lineup_confirmed) if pred else False
+            away_confirmed = bool(pred.away_lineup_confirmed) if pred else False
+            generated_at = pred.generated_at if pred else None
+            pred_schema = _prediction_row_to_schema(pred, g["home_team_id"], g["away_team_id"]) if pred else None
+
+            game_item = GameScheduleItem(
+                game_pk=g["game_pk"],
+                game_date=today,
+                venue_name=g.get("venue_name"),
+                home_team=TeamInfo(team_id=g["home_team_id"], team_abbr=g.get("home_team_abbr", "")),
+                away_team=TeamInfo(team_id=g["away_team_id"], team_abbr=g.get("away_team_abbr", "")),
+                home_sp=PitcherInfo(pitcher_id=g["home_sp_id"], pitcher_name=g.get("home_sp_name")) if g.get("home_sp_id") else None,
+                away_sp=PitcherInfo(pitcher_id=g["away_sp_id"], pitcher_name=g.get("away_sp_name")) if g.get("away_sp_id") else None,
+                home_lineup_confirmed=home_confirmed,
+                away_lineup_confirmed=away_confirmed,
+                predictions=pred_schema,
+                data_as_of=generated_at,
+            )
+            if home_confirmed and away_confirmed:
+                lineup_confirmed_count += 1
+            games_out.append(game_item)
+
+        last_refreshed = last_refresh.completed_at if last_refresh else None
 
     return TodayScheduleResponse(
         date=today,
@@ -206,7 +214,7 @@ async def get_today_schedule():
         total_games=len(games_out),
         lineups_confirmed=lineup_confirmed_count,
         lineups_projected=len(games_out) - lineup_confirmed_count,
-        last_refreshed=last_refresh.completed_at if last_refresh else None,
+        last_refreshed=last_refreshed,
     )
 
 
