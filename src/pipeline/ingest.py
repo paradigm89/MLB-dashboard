@@ -15,7 +15,7 @@ Usage:
 import argparse
 import logging
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -207,14 +207,18 @@ def _ingest_statcast_range(pb: PybaseballAdapter, start_date: str, end_date: str
     # Statcast rows are immutable so we skip conflicts rather than update.
     table = StatcastPitch.__table__
     table_cols = {c.name for c in table.columns}
-    records = [{k: (None if pd.isna(v) else v) for k, v in row.items() if k in table_cols}
-               for row in df.to_dict(orient="records")]
+    now = datetime.utcnow()
+    records = []
+    for row in df.to_dict(orient="records"):
+        rec = {k: (None if pd.isna(v) else v) for k, v in row.items() if k in table_cols}
+        rec["created_at"] = now  # set explicitly so SQLAlchemy doesn't apply the column default inconsistently
+        records.append(rec)
 
     inserted = 0
     with get_db() as session:
         for i in range(0, len(records), 500):
             batch = records[i : i + 500]
-            # Normalize keys across the batch
+            # Normalize keys across the batch so every row has identical columns
             all_keys = set().union(*batch)
             batch = [{k: rec.get(k, None) for k in all_keys} for rec in batch]
             stmt = pg_insert(table).values(batch).on_conflict_do_nothing()
@@ -292,6 +296,7 @@ def _upsert_dataframe(df: pd.DataFrame, model_class, conflict_cols: list[str]) -
     table = model_class.__table__
     table_cols = {c.name for c in table.columns}
 
+    now = datetime.utcnow()
     with get_db() as session:
         for batch_start in range(0, len(df), 500):
             batch = df.iloc[batch_start : batch_start + 500]
@@ -302,6 +307,11 @@ def _upsert_dataframe(df: pd.DataFrame, model_class, conflict_cols: list[str]) -
                 for col in conflict_cols:
                     if col not in record and col in row:
                         record[col] = row[col]
+                # Explicitly set timestamp columns so SQLAlchemy doesn't apply
+                # column defaults inconsistently across rows in a batch insert
+                record["created_at"] = now
+                if "updated_at" in table_cols:
+                    record["updated_at"] = now
                 records.append(record)
 
             if not records:
