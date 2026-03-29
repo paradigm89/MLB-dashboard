@@ -15,9 +15,17 @@ from typing import Optional
 import statsapi
 
 # Module-level cache: player name → MLB player ID.
-# Populated lazily during get_schedule() calls so we never hit the lookup API
-# more than once per name per process lifetime.
 _player_id_cache: dict[str, Optional[int]] = {}
+
+# Static team ID → abbreviation map (MLB team IDs are stable across seasons).
+_TEAM_ABBREVS: dict[int, str] = {
+    108: "LAA", 109: "ARI", 110: "BAL", 111: "BOS", 112: "CHC",
+    113: "CIN", 114: "CLE", 115: "COL", 116: "DET", 117: "HOU",
+    118: "KC",  119: "LAD", 120: "WSH", 121: "NYM", 133: "OAK",
+    134: "PIT", 135: "SD",  136: "SEA", 137: "SF",  138: "STL",
+    139: "TB",  140: "TEX", 141: "TOR", 142: "MIN", 143: "PHI",
+    144: "ATL", 145: "CWS", 146: "MIA", 147: "NYY", 158: "MIL",
+}
 
 import pandas as pd
 
@@ -46,19 +54,30 @@ class MLBStatsAdapter(DataAdapter):
 
         games = []
         for g in raw:
+            home_id = g.get("home_id")
+            away_id = g.get("away_id")
+            # statsapi doesn't return abbreviations — use static map as primary source
+            home_abbr = (g.get("home_abbrev") or g.get("home_abbreviation")
+                         or _TEAM_ABBREVS.get(home_id, ""))
+            away_abbr = (g.get("away_abbrev") or g.get("away_abbreviation")
+                         or _TEAM_ABBREVS.get(away_id, ""))
+            home_sp_id, home_sp_name = self._extract_pitcher_info(g.get("home_probable_pitcher"))
+            away_sp_id, away_sp_name = self._extract_pitcher_info(g.get("away_probable_pitcher"))
             games.append({
                 "game_pk": g["game_id"],
                 "game_date": date,
                 "game_type": g.get("game_type", "R"),
-                "home_team_id": g.get("home_id"),
-                "away_team_id": g.get("away_id"),
-                "home_team_abbr": g.get("home_abbrev", ""),
-                "away_team_abbr": g.get("away_abbrev", ""),
+                "home_team_id": home_id,
+                "away_team_id": away_id,
+                "home_team_abbr": home_abbr,
+                "away_team_abbr": away_abbr,
                 "venue_id": g.get("venue_id"),
                 "venue_name": g.get("venue_name", ""),
                 "status": g.get("status", ""),
-                "home_sp_id": self._extract_pitcher_id(g.get("home_probable_pitcher")),
-                "away_sp_id": self._extract_pitcher_id(g.get("away_probable_pitcher")),
+                "home_sp_id": home_sp_id,
+                "home_sp_name": home_sp_name,
+                "away_sp_id": away_sp_id,
+                "away_sp_name": away_sp_name,
             })
         return games
 
@@ -161,24 +180,26 @@ class MLBStatsAdapter(DataAdapter):
     # --- Helpers ------------------------------------------------------------
 
     @staticmethod
-    def _extract_pitcher_id(value) -> Optional[int]:
+    def _extract_pitcher_info(value) -> tuple[Optional[int], Optional[str]]:
         """
-        statsapi.schedule() returns probable_pitcher as:
-        - a dict {"id": 123, "fullName": "..."} in newer API versions
-        - a plain string full name in older/some API responses
-        - None / "" if not yet announced
-
-        String names are resolved to player IDs via statsapi.lookup_player()
-        with results cached for the process lifetime so we don't hammer the API.
+        Returns (pitcher_id, pitcher_name) from statsapi probable_pitcher value.
+        Value can be a dict {"id": 123, "fullName": "..."}, a plain string name,
+        a numeric id, or None.
         """
         if value is None or value == "":
-            return None
+            return None, None
         if isinstance(value, dict):
-            return value.get("id")
+            return value.get("id"), value.get("fullName")
         if isinstance(value, (int, float)):
-            return int(value)
-        # String name — resolve via player lookup
-        return MLBStatsAdapter._lookup_player_id_by_name(str(value).strip())
+            return int(value), None
+        # String name — resolve to ID, keep the name as-is
+        name = str(value).strip()
+        return MLBStatsAdapter._lookup_player_id_by_name(name), name
+
+    @staticmethod
+    def _extract_pitcher_id(value) -> Optional[int]:
+        """Kept for backward compatibility — delegates to _extract_pitcher_info."""
+        return MLBStatsAdapter._extract_pitcher_info(value)[0]
 
     @staticmethod
     def _lookup_player_id_by_name(name: str) -> Optional[int]:

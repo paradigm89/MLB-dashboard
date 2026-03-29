@@ -35,9 +35,9 @@ export default function MatchupCard({ game }: Props) {
 
         {/* Pitching matchup */}
         <div className="pitchers">
-          <span>{game.away_sp ? `SP: ${game.away_sp.pitcher_id}` : "SP TBD"}</span>
+          <span>{game.away_sp ? (game.away_sp.pitcher_name ?? `#${game.away_sp.pitcher_id}`) : "SP TBD"}</span>
           <span className="sep">vs</span>
-          <span>{game.home_sp ? `SP: ${game.home_sp.pitcher_id}` : "SP TBD"}</span>
+          <span>{game.home_sp ? (game.home_sp.pitcher_name ?? `#${game.home_sp.pitcher_id}`) : "SP TBD"}</span>
         </div>
 
         {/* Win probability bar */}

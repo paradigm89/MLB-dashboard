@@ -17,6 +17,8 @@ from src.api.schemas import (
 from src.db.connection import get_db
 from src.db.queries import get_active_model_version, get_last_refresh
 
+from fastapi import BackgroundTasks
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/system")
 
@@ -98,3 +100,14 @@ async def get_system_status():
         active_model_versions=model_versions,
         active_errors=active_errors,
     )
+
+
+@router.post("/refresh/morning")
+async def trigger_morning_refresh(background_tasks: BackgroundTasks):
+    """
+    Manually trigger a morning refresh (fetch today's games + generate predictions).
+    Runs in the background so the request returns immediately.
+    """
+    from src.pipeline.daily_refresh import run_morning_refresh
+    background_tasks.add_task(run_morning_refresh)
+    return {"status": "started", "message": "Morning refresh running in background. Check /api/system/status for progress."}
