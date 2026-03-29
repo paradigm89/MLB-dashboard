@@ -105,10 +105,15 @@ async def get_system_status():
 
 @router.post("/refresh/morning")
 async def trigger_morning_refresh(background_tasks: BackgroundTasks):
-    """
-    Manually trigger a morning refresh (fetch today's games + generate predictions).
-    Runs in the background so the request returns immediately.
-    """
+    """Manually trigger a morning refresh (fetch today's games + generate predictions)."""
     from src.pipeline.daily_refresh import run_morning_refresh
     background_tasks.add_task(run_morning_refresh)
     return {"status": "started", "message": "Morning refresh running in background. Check /api/system/status for progress."}
+
+
+@router.post("/refresh/afternoon")
+async def trigger_afternoon_refresh(background_tasks: BackgroundTasks):
+    """Manually trigger an afternoon refresh (check for confirmed lineups, re-run affected predictions)."""
+    from src.pipeline.daily_refresh import run_afternoon_refresh
+    background_tasks.add_task(run_afternoon_refresh)
+    return {"status": "started", "message": "Afternoon refresh running in background. Check /api/system/status for progress."}
