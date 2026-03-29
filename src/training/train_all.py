@@ -64,9 +64,17 @@ def train_all(train_seasons: list[int], val_season: int) -> None:
         logger.error("No feature data available. Run ingest.py first.")
         return
 
-    train_df = feature_df[feature_df["season"].isin(train_seasons)]
-    val_df = feature_df[feature_df["season"] == val_season]
+    train_df = feature_df[feature_df["season"].isin(train_seasons)].copy()
+    val_df = feature_df[feature_df["season"] == val_season].copy()
     logger.info("Train: %d games, Val: %d games", len(train_df), len(val_df))
+
+    # Cast all feature columns to float so XGBoost doesn't choke on object dtype.
+    # None / non-numeric values become np.nan, which XGBoost handles natively.
+    _feat_cols = [c for c in feature_df.columns if c not in _META_COLS + ["runs_scored_home", "runs_scored_away"]]
+    for _df in (train_df, val_df):
+        for _col in _feat_cols:
+            if _col in _df.columns and _df[_col].dtype == object:
+                _df[_col] = pd.to_numeric(_df[_col], errors="coerce")
 
     # --- 1. Run Expectancy Model -------------------------------------------
     _train_run_model(cfg, train_df, val_df, date_str)
@@ -263,7 +271,16 @@ def _build_pitcher_training_data(seasons: list[int]) -> pd.DataFrame:
                "opponent_team_id", "xfip_season", "k_pct", "bb_pct",
                "avg_fastball_velo", "swstr_pct", "pct_ff", "pct_sl", "pct_ch",
                "pct_cu", "throws", "park_factor_runs", "xfip_actual"]
-    return pd.DataFrame(rows, columns=columns)
+    df = pd.DataFrame(rows, columns=columns)
+    # Encode categoricals so XGBoost gets all-numeric input
+    df["is_home"] = (df["side"] == "home").astype(int)
+    df["throws_l"] = (df["throws"] == "L").astype(int)
+    df = df.drop(columns=["side", "throws"], errors="ignore")
+    # Coerce remaining object columns to float
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
 
 
 def _build_pa_training_data(seasons: list[int]) -> pd.DataFrame:
