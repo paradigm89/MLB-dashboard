@@ -52,8 +52,8 @@ class MLBStatsAdapter(DataAdapter):
                 "venue_id": g.get("venue_id"),
                 "venue_name": g.get("venue_name", ""),
                 "status": g.get("status", ""),
-                "home_sp_id": g.get("home_probable_pitcher", {}).get("id"),
-                "away_sp_id": g.get("away_probable_pitcher", {}).get("id"),
+                "home_sp_id": self._extract_pitcher_id(g.get("home_probable_pitcher")),
+                "away_sp_id": self._extract_pitcher_id(g.get("away_probable_pitcher")),
             })
         return games
 
@@ -144,6 +144,21 @@ class MLBStatsAdapter(DataAdapter):
         raise NotImplementedError("Use PybaseballAdapter for park factors")
 
     # --- Helpers ------------------------------------------------------------
+
+    @staticmethod
+    def _extract_pitcher_id(value) -> Optional[int]:
+        """
+        statsapi.schedule() returns probable_pitcher as either:
+        - a dict {"id": 123, "fullName": "..."} in some versions
+        - a plain string name in others
+        - None if not yet announced
+        """
+        if value is None or value == "":
+            return None
+        if isinstance(value, dict):
+            return value.get("id")
+        # It's a string name — we can't get an ID from it, return None
+        return None
 
     def _sort_batting_order(self, team_data: dict, player_ids: list) -> list:
         """Sort player IDs by battingOrder field from the boxscore."""

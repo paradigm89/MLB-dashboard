@@ -252,7 +252,8 @@ class PybaseballAdapter(DataAdapter):
     def get_park_factors(self, season: int) -> pd.DataFrame:
         logger.info("Fetching park factors for %d", season)
         try:
-            df = pybaseball.park_factors(season)
+            # pybaseball uses team_park_factors, not park_factors
+            df = pybaseball.team_park_factors(pos="np", season=season, league="ALL")
         except Exception as exc:
             logger.error("Park factors fetch failed for %d: %s", season, exc)
             return pd.DataFrame()
